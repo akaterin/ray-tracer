@@ -213,6 +213,13 @@
 			Reflections of light sources remain unaffected.
 		</param>
 	</plugin>
+	
+	<plugin type="integrator" name="vcmIntegrator" readableName="Vertex Connection And Merging Integrator"
+			show="true" className="DirectIntegrator" extends="SampleIntegrator">
+			<descr>
+				<p>Mine!!</p>
+			</descr>
+	</plugin>
 
 	<plugin type="integrator" name="path" readableName="Path tracer"
 			show="true" className="MIPathTracer" extends="MonteCarloIntegrator">

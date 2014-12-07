@@ -1,6 +1,7 @@
 Import('env', 'sys', 'plugins')
 
 plugins += env.SharedLibrary('kkIntegrator', ['kk/direct.cpp'])
+plugins += env.SharedLibrary('vcmIntegrator', ['kk/vcm.cpp'])
 
 plugins += env.SharedLibrary('ao', ['direct/ao.cpp'])
 plugins += env.SharedLibrary('direct', ['direct/direct.cpp'])
