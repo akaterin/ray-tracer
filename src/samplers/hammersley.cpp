@@ -250,8 +250,8 @@ public:
 		if (m_dimension >= primeTableSize)
 			Log(EError, "Lookup dimension exceeds the prime number table size! "
 				"You may have to reduce the 'maxDepth' parameter of your integrator.");
-		if (m_sampleIndex >= m_samplesPerBatch)
-			Log(EError, "Sample index exceeded the maximum count!");
+		//if (m_sampleIndex >= m_samplesPerBatch)
+		//	Log(EError, "Sample index exceeded the maximum count!");
 
 		return nextFloat(m_offset + m_stride * m_sampleIndex);
 	}
@@ -263,8 +263,8 @@ public:
 		if (m_dimension + 1 >= primeTableSize)
 			Log(EError, "Lookup dimension exceeds the prime number table size! "
 				"You may have to reduce the 'maxDepth' parameter of your integrator.");
-		if (m_sampleIndex >= m_samplesPerBatch)
-			Log(EError, "Sample index exceeded the maximum count!");
+		//if (m_sampleIndex >= m_samplesPerBatch)
+		//	Log(EError, "Sample index exceeded the maximum count!");
 
 		uint64_t index = m_offset + m_stride * m_sampleIndex;
 

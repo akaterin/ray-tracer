@@ -4,6 +4,7 @@
 #include <mitsuba/bidir/path.h>
 #include <vector>
 #include <utility>
+#include <windows.h>
 #include "vcm.h"
 
 MTS_NAMESPACE_BEGIN
@@ -62,6 +63,7 @@ public:
 		ref<Sensor> sensor = scene->getSensor();
 		const Film *film = sensor->getFilm();
 		const Vector2i res = film->getSize();
+		scene->getSampler()->advance();
 		int pathCount = res.x*res.y;
 
 
@@ -71,32 +73,27 @@ public:
 
 		std::vector<Path* > paths;
 		paths.reserve(pathCount);
-		Log(EInfo, "Sample count %i", scene->getSampler()->getSampleCount());
 		for(int i = 0; i<pathCount; ++i) {
-			Log(EInfo, "%i", i);
+			Float time = i*1000;
+			//Log(EInfo, "%i", i);
+			//Sleep(50);
 			Path* emitterPath = new Path();
-			Float time = scene->getSensor()->sampleTime(scene->getSampler()->next1D());
-			Log(EInfo, "Attempting initialization");
+			//Log(EInfo, "Attempting initialization");
 			emitterPath->initialize(scene, time, EImportance, m_pool);
-			Log(EInfo, "path initialized");
-			emitterPath->randomWalk(scene,scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
-			Log(EInfo, "walk done");
+			//Log(EInfo, "path initialized");
+			//m_config.dump()
+			emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
+			scene->getSampler()->advance();
+			//Log(EInfo, "walk done");
 			paths.push_back(emitterPath);
 		}
 
 		for(int i = 0; i<pathCount; ++i){
+			paths[i]->release(m_pool);
 			delete paths[i];
 		}
 
-		/*Path emitterSubpath;
-		Float time = scene->getSensor()->sampleTime(scene->getSampler()->next1D());
-		emitterSubpath.initialize(scene, time, EImportance, m_pool);
-		PathVertex* tmp = emitterSubpath.vertex(0);
-		bool isEmmiterSuperNode = tmp->isEmitterSupernode();
-		if ( isEmmiterSuperNode )
-			SLog(EInfo, "Is super node");
-		else
-			SLog(EInfo, "Is not super node");*/
+
 
 		return true;
 	}

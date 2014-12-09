@@ -234,6 +234,8 @@ public:
 		if (m_dimension >= m_arrayStartDim && m_dimension < m_arrayEndDim)
 			m_dimension = m_arrayEndDim;
 
+		//Log(EInfo, "%i", m_dimension);
+
 		if (m_dimension + 1 >= sobol::Matrices::num_dimensions)
 			Log(EError, "Lookup dimension exceeds the direction number table size! You "
 				"may have to reduce the 'maxDepth' parameter of your integrator.");

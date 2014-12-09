@@ -217,7 +217,7 @@
 	<plugin type="integrator" name="vcmIntegrator" readableName="Vertex Connection And Merging Integrator"
 			show="true" className="VCMIntegrator" extends="Integrator">
 			<descr>
-				<p>Mine!!</p>
+				<p>Mine!!!</p>
 			</descr>
 			<param name="maxDepth" readableName="Maximum depth" type="integer" default="-1">
 				Specifies the longest path depth in the generated output image (where <tt>-1</tt>
