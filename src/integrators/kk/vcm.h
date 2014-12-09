@@ -3,6 +3,9 @@
 #define __VCM_H
 
 #include <mitsuba/mitsuba.h>
+#include <mitsuba/render/renderproc.h>
+#include <mitsuba/render/renderjob.h>
+#include <mitsuba/core/bitmap.h>
 
 
 MTS_NAMESPACE_BEGIN
@@ -16,16 +19,26 @@ MTS_NAMESPACE_BEGIN
  * vertex connection and merging tracer
  */
 struct VCMConfiguration {
+	int maxDepth;
+	int rrDepth;
+
+
 	inline VCMConfiguration() { }
 
 	inline VCMConfiguration(Stream *stream){
-
+		maxDepth = stream->readInt();
+		rrDepth = stream->readInt();
 	}
 
 	inline void serialize(Stream *stream) const {
+		stream->writeInt(maxDepth);
+		stream->writeInt(rrDepth);
 	}
 
 	void dump() const {
+		SLog(EInfo, "Vertex connection and merging configuration:");
+		SLog(EInfo, "   Maximum path depth          : %i", maxDepth);
+		SLog(EInfo, "   Russian roulette depth      : %i", rrDepth);
 	}
 };
 

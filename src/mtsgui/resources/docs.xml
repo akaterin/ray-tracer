@@ -215,10 +215,19 @@
 	</plugin>
 	
 	<plugin type="integrator" name="vcmIntegrator" readableName="Vertex Connection And Merging Integrator"
-			show="true" className="DirectIntegrator" extends="SampleIntegrator">
+			show="true" className="VCMIntegrator" extends="Integrator">
 			<descr>
 				<p>Mine!!</p>
 			</descr>
+			<param name="maxDepth" readableName="Maximum depth" type="integer" default="-1">
+				Specifies the longest path depth in the generated output image (where <tt>-1</tt>
+				corresponds to ∞). A value of 1 will only render directly visible light sources.
+				2 will lead to single-bounce (direct-only) illumination, and so on.
+			</param>
+			<param name="rrDepth" readableName="Russian Roulette starting depth" type="integer" default="5" importance="1">
+				Specifies the minimum path depth, after which the implementation will start to use the
+				"russian roulette" path termination criterion (set to <tt>-1</tt> to disable).
+			</param>
 	</plugin>
 
 	<plugin type="integrator" name="path" readableName="Path tracer"

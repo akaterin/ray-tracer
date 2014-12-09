@@ -1,7 +1,6 @@
 Import('env', 'sys', 'plugins')
 
-plugins += env.SharedLibrary('kkIntegrator', ['kk/direct.cpp'])
-plugins += env.SharedLibrary('vcmIntegrator', ['kk/vcm.cpp'])
+
 
 plugins += env.SharedLibrary('ao', ['direct/ao.cpp'])
 plugins += env.SharedLibrary('direct', ['direct/direct.cpp'])
@@ -41,5 +40,8 @@ plugins += bidirEnv.SharedLibrary('mlt',
 plugins += bidirEnv.SharedLibrary('erpt',
 	['erpt/erpt.cpp', 'erpt/erpt_proc.cpp']
 )
+
+plugins += env.SharedLibrary('kkIntegrator', ['kk/direct.cpp'])
+plugins += bidirEnv.SharedLibrary('vcmIntegrator', ['kk/vcm.cpp'])
 
 Export('plugins')
