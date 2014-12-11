@@ -87,14 +87,11 @@ public:
 		m_lightVertices.clear();
 		for(int i = 0; i<pathCount; ++i) {
 			Float time = i*1000;
-			//Log(EInfo, "%i", i);
-			//Sleep(50);
 			Path* emitterPath = new Path();
-			//Log(EInfo, "Attempting initialization");
 			emitterPath->initialize(scene, time, EImportance, m_pool);
-			//Log(EInfo, "path initialized");
-			//m_config.dump()
 			emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
+
+			connectToEye(scene, time, emitterPath);
 
 			for(int vertexIdx = 0; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
 				PathVertexPtr vertex = emitterPath->vertex(vertexIdx);
@@ -107,9 +104,8 @@ public:
 			}
 
 
-
 			scene->getSampler()->advance();
-			//Log(EInfo, "walk done");
+			//Pytanie czy ścieżki, których się nie udało połączyć z okiem też tu wrzucać?
 			paths.push_back(emitterPath);
 		}
 
@@ -131,6 +127,26 @@ public:
 
 
 		return true;
+	}
+
+	bool connectToEye(Scene *scene, Float time, Path *emitterPath) {
+		int prevSize = emitterPath->vertexCount();
+		Path* sensorPath = new Path();
+		sensorPath->initialize(scene, time, ERadiance, m_pool);
+		sensorPath->randomWalk(scene, scene->getSampler(), 1, 0, ERadiance, m_pool);
+		PathVertex* vertexOnEye = sensorPath->vertex(1);
+		PathVertex* succOnSensor = sensorPath->vertex(0);
+		PathEdge* succEdge = sensorPath->edge(0);
+		PathEdge* lastEdge = emitterPath->edge(emitterPath->edgeCount()-1);
+		PathVertex* predLastVertex = emitterPath->vertexOrNull(emitterPath->vertexCount()-2);
+		PathVertex* lastVertex = emitterPath->vertex(emitterPath->vertexCount()-1);
+		PathEdge* newEgde = new PathEdge();
+		bool succeded = PathVertex::connect(scene, predLastVertex, lastEdge, lastVertex, newEgde, vertexOnEye, succEdge, succOnSensor);
+		if( !succeded )
+			return false;
+		emitterPath->append(newEgde, vertexOnEye);
+		emitterPath->append(succEdge, succOnSensor);
+		return succeded;
 	}
 
 	MTS_DECLARE_CLASS()
