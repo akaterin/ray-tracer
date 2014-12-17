@@ -41,7 +41,6 @@ plugins += bidirEnv.SharedLibrary('erpt',
 	['erpt/erpt.cpp', 'erpt/erpt_proc.cpp']
 )
 
-plugins += env.SharedLibrary('kkIntegrator', ['kk/direct.cpp'])
 plugins += bidirEnv.SharedLibrary('vcmIntegrator', ['kk/vcm.cpp'])
 
 Export('plugins')

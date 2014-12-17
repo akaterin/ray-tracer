@@ -1,5 +1,4 @@
 #include <mitsuba/render/scene.h>
-#include "direct.h"
 #include <vector>
 #include <iostream>
 
@@ -76,7 +75,7 @@ public:
 		const BSDF *bsdf = its.getBSDF(r);
 		DirectSamplingRecord directRec(its);
 		std::vector<SamplingValue> samplingValues;
-			
+
 		Point2* samplesArray;
 		if( brdfSamplesNo > 1 ){
 			samplesArray = rRec.sampler->next2DArray(brdfSamplesNo);
@@ -117,7 +116,7 @@ public:
 				if (!env->fillDirectSamplingRecord(directRec, bsdfRay))
 					continue;
 			}
-		
+
 			Float lightPdf = (!(bsdfRec.sampledType & BSDF::EDelta)) ? rRec.scene->pdfEmitterDirect(directRec) : 0;
 			samplingValues.push_back(createSamplingRecord(value, bsdfVal, bsdfPdf, lightPdf));
 		}
@@ -173,7 +172,7 @@ public:
 		}
 		return Li;
 	}
-	
+
 	MTS_DECLARE_CLASS()
 private:
 

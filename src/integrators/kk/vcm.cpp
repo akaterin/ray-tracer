@@ -5,8 +5,20 @@
 #include <mitsuba/bidir/path.h>
 #include <vector>
 #include <utility>
+#include <unistd.h>
+
 #include "vcm.h"
 
+#define LogWithSleep(fmt, ...) do { \
+		mitsuba::Thread *thread = mitsuba::Thread::getThread(); \
+		if (EXPECT_NOT_TAKEN(thread == NULL)) \
+			throw std::runtime_error("Null thread pointer"); \
+		mitsuba::Logger *logger = thread->getLogger(); \
+		if (logger != NULL && EInfo >= logger->getLogLevel()) \
+			logger->log(EInfo, m_theClass, \
+				__FILE__, __LINE__, fmt, ## __VA_ARGS__); \
+		usleep(100 * 1000); \
+	} while (0)
 MTS_NAMESPACE_BEGIN
 
 typedef PathVertex*		  PathVertexPtr;
@@ -107,12 +119,8 @@ public:
 		m_lightVertices.clear();
 		for(int i = 0; i<pathCount; ++i) {
 			Float time = i*1000;
-			//Log(EInfo, "%i", i);
 			Path* emitterPath = new Path();
-			//Log(EInfo, "Attempting initialization");
 			emitterPath->initialize(scene, time, EImportance, m_pool);
-			//Log(EInfo, "path initialized");
-			//m_config.dump()
 			emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
 
 			Float dVCM = 0;
@@ -122,6 +130,7 @@ public:
 
 			// skip Emitter Supernode
 			for(int vertexIdx = 1; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
+
 
 				PathVertexPtr vertex = emitterPath->vertex(vertexIdx);
 				Log(EInfo, "Vertex type %d", vertex->type);
@@ -158,16 +167,19 @@ public:
 
 				    // TODO: don't store those values if BSDF
 				    // is purely specular
-				    vertex->data[EdVCMData] = dVCM;
-				    vertex->data[EdVCData]  = dVC;
-				    vertex->data[EdVMData]  = dVM;
+				    //vertex->data[EdVCMData] = dVCM;
+				    //vertex->data[EdVCData]  = dVC;
+				    //vertex->data[EdVMData]  = dVM;
 				    m_lightVertices.push_back(vertex);
 				}
 			}
 
 
+			LogWithSleep("Before connectToEye, emitterPath length: %d", emitterPath->vertexCount());
+			connectToEye(scene, time, emitterPath);
+			Log(EInfo, "After connectToEye");
 			scene->getSampler()->advance();
-			//Log(EInfo, "walk done");
+			//Pytanie czy ścieżki, których się nie udało połączyć z okiem też tu wrzucać?
 			paths.push_back(emitterPath);
 		}
 
@@ -189,6 +201,36 @@ public:
 
 
 		return true;
+	}
+
+	bool connectToEye(Scene *scene, Float time, Path *emitterPath) {
+		Path* sensorPath = new Path();
+		sensorPath->initialize(scene, time, ERadiance, m_pool);
+		LogWithSleep("sensorPath initialized");
+		sensorPath->randomWalk(scene, scene->getSampler(), 1, 0, ERadiance, m_pool);
+		LogWithSleep("random walk performed");
+		PathVertex* vertexOnEye = sensorPath->vertex(1);
+		PathVertex* succOnSensor = sensorPath->vertex(0);
+		PathEdge* succEdge = sensorPath->edge(0);
+		PathEdge* lastEdge = emitterPath->edge(emitterPath->edgeCount()-1);
+		PathVertex* predLastVertex = emitterPath->vertexOrNull(emitterPath->vertexCount()-2);
+		PathVertex* lastVertex = emitterPath->vertex(emitterPath->vertexCount()-1);
+		LogWithSleep("acquired pointers");
+		LogWithSleep("vertexOnEye addr: %d", vertexOnEye);
+		LogWithSleep("succOnSensor addr: %d", succOnSensor);
+		LogWithSleep("succEdge addr: %d", succEdge);
+		LogWithSleep("lastEdge addr: %d", lastEdge);
+		LogWithSleep("predLastVertex addr: %d", predLastVertex);
+		LogWithSleep("lastVertex addr: %d", lastVertex);
+		PathEdge* newEgde = new PathEdge();
+		bool succeded = PathVertex::connect(scene, predLastVertex, lastEdge, lastVertex, newEgde, vertexOnEye, succEdge, succOnSensor);
+		LogWithSleep("Tried to connect with the eye, status: %d", succeded);
+		if( !succeded )
+			return false;
+		emitterPath->append(newEgde, vertexOnEye);
+		emitterPath->append(succEdge, succOnSensor);
+		LogWithSleep("appended paths");
+		return succeded;
 	}
 
 	MTS_DECLARE_CLASS()
