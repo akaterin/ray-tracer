@@ -1,13 +1,38 @@
 
 #include <mitsuba/bidir/vertex.h>
+#include <mitsuba/core/kdtree.h>
 #include <mitsuba/bidir/edge.h>
 #include <mitsuba/bidir/path.h>
 #include <vector>
 #include <utility>
-#include <windows.h>
+
 #include "vcm.h"
 
+
 MTS_NAMESPACE_BEGIN
+
+typedef PathVertex*		  PathVertexPtr;
+//    typedef VCMKDTree::IndexType    IndexType;
+//    typedef VCMKDTree::SearchResult SearchResult;
+
+enum EVCMVertexData {
+    EdVCMData = 0,
+    EdVCData = 1,
+    EdVMData = 2
+};
+
+struct VCMTreeEntry :
+	public SimpleKDNode<Point, PathVertexPtr> {
+public:
+	/// Dummy constructor
+	inline VCMTreeEntry() {}
+	inline VCMTreeEntry(PathVertexPtr pathVertexPtr) {
+	   position = pathVertexPtr->getPosition();
+	}
+
+	/// Return a string representation (for debugging)
+	std::string toString() const {}
+};
 
 class VCMIntegrator : public Integrator {
 public:
@@ -60,11 +85,18 @@ public:
 
 		Log(EInfo, "Start");
 
+		const Float radius = 1e-4;
+		const Float radiusSqr = radius * radius;
+
 		ref<Sensor> sensor = scene->getSensor();
 		const Film *film = sensor->getFilm();
 		const Vector2i res = film->getSize();
 		scene->getSampler()->advance();
 		int pathCount = res.x*res.y;
+
+		const Float etaVCM = (M_PI * radiusSqr) * pathCount;
+		const Float misVMWeightFactor = etaVCM;
+		const Float misVCWeightFactor = 1.f / etaVCM;
 
 
 		//////////////////////////////////////////////////////////////////////////
@@ -73,12 +105,68 @@ public:
 
 		std::vector<Path* > paths;
 		paths.reserve(pathCount);
+		m_lightVertices.reserve(pathCount);
+		m_lightVertices.clear();
 		for(int i = 0; i<pathCount; ++i) {
 			Float time = i*1000;
 			Path* emitterPath = new Path();
 			emitterPath->initialize(scene, time, EImportance, m_pool);
 			emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
 
+			Float dVCM = 0;
+			Float dVC = 0;
+			Float dVM = 0;
+			Spectrum throughput;
+
+			// skip Emitter Supernode
+			for(int vertexIdx = 1; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
+
+
+				PathVertexPtr vertex = emitterPath->vertex(vertexIdx);
+				Log(EInfo, "Vertex type %d", vertex->type);
+				if (!(vertex->type & PathVertex::ENormal)) {
+				    continue;
+				}
+
+				Log(EInfo, "Creating intersection");
+				const Intersection &its = vertex->getIntersection();
+				DirectSamplingRecord dRec(its);
+				BSDFSamplingRecord bRec(its, its.toLocal(dRec.d));
+				// if it's on sensor, sample MIS values
+				if (vertexIdx == 1) {
+				    // not sure if it's exactly this
+				    // if not, look around
+				    // src/libbidir/vertex.cpp line 806-824
+					Log(EInfo, "First vertex...");
+				    throughput = vertex->weight[ERadiance];
+				    DirectionSamplingRecord dirRec(its);
+				    Float emissionPdf = dirRec.pdf;
+
+				    dVCM = 1 / emissionPdf;
+
+				    // TODO: handle delta and infinite lights
+				    dVC = vertex->getGeometricNormal().z / emissionPdf;
+				    dVM = dVC * misVCWeightFactor;
+					Log(EInfo, "End first vertex...");
+				}
+				else {
+				    // TODO: handle infinite light
+				    dVCM *= its.t * its.t;
+
+				    dVCM /= std::abs(bRec.wi.z);
+				    dVC  /= std::abs(bRec.wi.z);
+				    dVM  /= std::abs(bRec.wi.z);
+
+				    // TODO: don't store those values if BSDF
+				    // is purely specular
+				    //vertex->data[EdVCMData] = dVCM;
+				    //vertex->data[EdVCData]  = dVC;
+				    //vertex->data[EdVMData]  = dVM;
+				    m_lightVertices.push_back(vertex);
+				}
+			}
+
+			Log(EInfo, "Starting to connect to eye...");
 			connectToEye(scene, time, emitterPath);
 
 			scene->getSampler()->advance();
@@ -86,28 +174,34 @@ public:
 			paths.push_back(emitterPath);
 		}
 
+		Log(EInfo, "Starting to build...");
+
+		/////////////////////////////////////////////////////////////////////////
+		// BUILD SEARCH STRUCT
+		/////////////////////////////////////////////////////////////////////////
+
+		m_tree.reserve(pathCount);
+		for(int i=0; i<m_lightVertices.size(); i++) {
+			m_tree.push_back(m_lightVertices[i]);
+		}
 
 
-		for(int i = 0; i<pathCount; ++i){
-
-			//////////////////////////////////////////////////////////////////////////
+		for(int i = 0; i<pathCount; ++i) {
 			// Generate eye path
-			//////////////////////////////////////////////////////////////////////////
-
-			Path* sensorPath = new Path();
+			Path *sensorPath = new Path();
 			sensorPath->initialize(scene, 0, ERadiance, m_pool);
-			Point2i startPosition = Point2i(i%res.x, (i - i%res.x)/res.x);
+			Point2i startPosition = Point2i(i % res.x, (i - i % res.x) / res.x);
 			//Log(EInfo,"%i %i %i", i, startPosition.x, startPosition.y);
 			//Sleep(100);
 			sensorPath->randomWalkFromPixel(scene, scene->getSampler(), m_config.maxDepth, startPosition, m_config.rrDepth, m_pool);
 			scene->getSampler()->advance();
 		}
 
+
 		for(int i = 0; i<pathCount; ++i){
 			paths[i]->release(m_pool);
 			delete paths[i];
 		}
-
 
 		return true;
 	}
@@ -135,6 +229,8 @@ public:
 	MTS_DECLARE_CLASS()
 private:
 	ref<ParallelProcess> m_process;
+	std::vector<PathVertexPtr> m_lightVertices;
+	PointKDTree<VCMTreeEntry> m_tree;
 	VCMConfiguration m_config;
 	MemoryPool m_pool;
 };
