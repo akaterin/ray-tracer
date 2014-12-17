@@ -1,25 +1,38 @@
 
 #include <mitsuba/bidir/vertex.h>
+#include <mitsuba/core/kdtree.h>
 #include <mitsuba/bidir/edge.h>
 #include <mitsuba/bidir/path.h>
 #include <vector>
 #include <utility>
-#include <windows.h>
 #include "vcm.h"
 
 MTS_NAMESPACE_BEGIN
 
+typedef PathVertex*		  PathVertexPtr;
+//    typedef VCMKDTree::IndexType    IndexType;
+//    typedef VCMKDTree::SearchResult SearchResult;
+
+enum EVCMVertexData {
+    EdVCMData = 0,
+    EdVCData = 1,
+    EdVMData = 2
+};
+
+struct MTS_EXPORT_RENDER VCMTreeEntry :
+	public SimpleKDNode<Point, PathVertexPtr> {
+public:
+	/// Dummy constructor
+	inline VCMTreeEntry() {}
+	inline VCMTreeEntry(PathVertexPtr pathVertexPtr) {
+	   position = pathVertexPtr->getPosition();
+	}
+
+	/// Return a string representation (for debugging)
+	std::string toString() const {}
+};
+
 class VCMIntegrator : public Integrator {
-    typedef PointKDTree<PathVertexPtr> VCMKDTree;
-    typedef VCMKDTree::IndexType IndexType;
-    typedef VCMKDTree::SearchResult SearchResult;
-
-    enum {
-	EdVCMData = 0,
-	edVCData = 1,
-	edVMData = 2
-    };
-
 public:
 	VCMIntegrator(const Properties &props) : Integrator(props) {
 		/* Load the parameters / defaults */
@@ -70,11 +83,18 @@ public:
 
 		Log(EInfo, "Start");
 
+		const Float radius = 1e-4;
+		const Float radiusSqr = radius * radius;
+
 		ref<Sensor> sensor = scene->getSensor();
 		const Film *film = sensor->getFilm();
 		const Vector2i res = film->getSize();
 		scene->getSampler()->advance();
 		int pathCount = res.x*res.y;
+
+		const Float etaVCM = (M_PI * radiusSqr) * pathCount;
+		const Float misVMWeightFactor = etaVCM;
+		const Float misVCWeightFactor = 1.f / etaVCM;
 
 
 		//////////////////////////////////////////////////////////////////////////
@@ -88,7 +108,6 @@ public:
 		for(int i = 0; i<pathCount; ++i) {
 			Float time = i*1000;
 			//Log(EInfo, "%i", i);
-			//Sleep(50);
 			Path* emitterPath = new Path();
 			//Log(EInfo, "Attempting initialization");
 			emitterPath->initialize(scene, time, EImportance, m_pool);
@@ -96,16 +115,55 @@ public:
 			//m_config.dump()
 			emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
 
-			for(int vertexIdx = 0; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
-				PathVertexPtr vertex = emitterPath->vertex(vertexIdx);
-				// TODO: store all information in the
-				// PathVertex struct
-				// vertex->data[EdVCMData] = ...
-				// vertex->data[EdVCData] = ...
-				// vertex->data[EdVMData] = ...
-				m_lightVertices.push_back(vertex);
-			}
+			Float dVCM = 0;
+			Float dVC = 0;
+			Float dVM = 0;
+			Spectrum throughput;
 
+			// skip Emitter Supernode
+			for(int vertexIdx = 1; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
+
+				PathVertexPtr vertex = emitterPath->vertex(vertexIdx);
+				Log(EInfo, "Vertex type %d", vertex->type);
+				if (!(vertex->type & PathVertex::ENormal)) {
+				    continue;
+				}
+
+
+				const Intersection &its = vertex->getIntersection();
+				DirectSamplingRecord dRec(its);
+				BSDFSamplingRecord bRec(its, its.toLocal(dRec.d));
+				// if it's on sensor, sample MIS values
+				if (vertexIdx == 1) {
+				    // not sure if it's exactly this
+				    // if not, look around
+				    // src/libbidir/vertex.cpp line 806-824
+				    throughput = vertex->weight[ERadiance];
+				    DirectionSamplingRecord dirRec(its);
+				    Float emissionPdf = dirRec.pdf;
+
+				    dVCM = 1 / emissionPdf;
+
+				    // TODO: handle delta and infinite lights
+				    dVC = vertex->getGeometricNormal().z / emissionPdf;
+				    dVM = dVC * misVCWeightFactor;
+				}
+				else {
+				    // TODO: handle infinite light
+				    dVCM *= its.t * its.t;
+
+				    dVCM /= std::abs(bRec.wi.z);
+				    dVC  /= std::abs(bRec.wi.z);
+				    dVM  /= std::abs(bRec.wi.z);
+
+				    // TODO: don't store those values if BSDF
+				    // is purely specular
+				    vertex->data[EdVCMData] = dVCM;
+				    vertex->data[EdVCData]  = dVC;
+				    vertex->data[EdVMData]  = dVM;
+				    m_lightVertices.push_back(vertex);
+				}
+			}
 
 
 			scene->getSampler()->advance();
@@ -136,8 +194,8 @@ public:
 	MTS_DECLARE_CLASS()
 private:
 	ref<ParallelProcess> m_process;
-	vector<PathVertexPtr> m_lightVertices;
-	VCMKDTree m_tree;
+	std::vector<PathVertexPtr> m_lightVertices;
+	PointKDTree<VCMTreeEntry> m_tree;
 	VCMConfiguration m_config;
 	MemoryPool m_pool;
 };
