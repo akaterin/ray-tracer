@@ -86,11 +86,27 @@ public:
 			paths.push_back(emitterPath);
 		}
 
+
+
+		for(int i = 0; i<pathCount; ++i){
+
+			//////////////////////////////////////////////////////////////////////////
+			// Generate eye path
+			//////////////////////////////////////////////////////////////////////////
+
+			Path* sensorPath = new Path();
+			sensorPath->initialize(scene, 0, ERadiance, m_pool);
+			Point2i startPosition = Point2i(i%res.x, (i - i%res.x)/res.x);
+			//Log(EInfo,"%i %i %i", i, startPosition.x, startPosition.y);
+			//Sleep(100);
+			sensorPath->randomWalkFromPixel(scene, scene->getSampler(), m_config.maxDepth, startPosition, m_config.rrDepth, m_pool);
+			scene->getSampler()->advance();
+		}
+
 		for(int i = 0; i<pathCount; ++i){
 			paths[i]->release(m_pool);
 			delete paths[i];
 		}
-
 
 
 		return true;
