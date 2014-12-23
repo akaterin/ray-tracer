@@ -1,4 +1,3 @@
-
 #include <mitsuba/bidir/vertex.h>
 #include <mitsuba/core/kdtree.h>
 #include <mitsuba/bidir/edge.h>
@@ -147,27 +146,41 @@ class VCMIntegrator : public Integrator {
 			continue;
 		    }
 
-		    const Intersection &its = vertex->getIntersection();
-		    DirectSamplingRecord dRec(its);
-		    BSDFSamplingRecord bRec(its, its.toLocal(dRec.d));
+			Log(EInfo, "after bRec");
 		    // if it's on sensor, sample MIS values
-		    if (vertexIdx == 1) {
-			Assert( vertex->type & PathVertex::EEmitterSample );
-			// not sure if it's exactly this
-			// if not, look around
-			// src/libbidir/vertex.cpp line 806-824
-			throughput = vertex->weight[ERadiance];
-			DirectionSamplingRecord dirRec(its);
-			Float emissionPdf = dirRec.pdf;
+		    if (vertexIdx == 1 && emitterPath->vertexCount() > 2) {
+			PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
 
-			dVCM = 1 / emissionPdf;
+			Assert( vertex->type & PathVertex::EEmitterSample );
+			// ewentualnie its.Le( vertex[1] - vertex[0] ) Returns radiance emitted into direction d.
+			Float emissionPdf = emitterPath->vertex(0)->pdf[EImportance];
+			// not sure if it's direct right now :/
+			Float directPdf = pRec.pdf;
+			Log(EInfo, "Direct= %f, emission= %f", directPdf, emissionPdf);
+			throughput = vertex->weight[ERadiance] / emissionPdf;
+
+			dVCM = directPdf / emissionPdf;
+
+			Vector wo = emitterPath->vertex(2)->getPosition() - pRec.p;
+			Float dist = wo.length(); wo /= dist;
+			Float cosTheta = std::abs(dot(pRec.n, wo));
 
 			// TODO: handle delta and infinite lights
-			dVC = vertex->getGeometricNormal().z / emissionPdf;
+			dVC = cosTheta / emissionPdf;
 			dVM = dVC * misVCWeightFactor;
 		    }
 		    else {
 			// TODO: handle infinite light
+			// there's much more to computing MIS values here
+			// (SampleScattering @ SmallVCM)
+			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
+			    Log(EInfo, "Other vertex type: %d", vertex->getType());
+			    continue;
+			}
+			const Intersection &its = vertex->getIntersection();
+			DirectSamplingRecord dRec(its);
+			BSDFSamplingRecord bRec(its, its.toLocal(dRec.d));
+
 			dVCM *= its.t * its.t;
 
 			dVCM /= std::abs(bRec.wi.z);
