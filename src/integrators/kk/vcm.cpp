@@ -36,11 +36,22 @@ struct VCMVertex {
     // Stores all required local information, including incoming direction.
     // TODO: will it boom as it's a pointer?
     const BSDF* mBsdf;
-    float dVCM; // MIS quantity used for vertex connection and merging
-    float dVC;  // MIS quantity used for vertex connection
-    float dVM;  // MIS quantity used for vertex merging
+    Float dVCM; // MIS quantity used for vertex connection and merging
+    Float dVC;  // MIS quantity used for vertex connection
+    Float dVM;  // MIS quantity used for vertex merging
 };
 
+// to make easier to carry those values around
+struct SubPathState
+{
+    Spectrum mThroughput;         // Path throughput
+    bool  mIsFiniteLight;
+    bool  mSpecularPath;
+
+    Float dVCM; // MIS quantity used for vertex connection and merging
+    Float dVC;  // MIS quantity used for vertex connection
+    Float dVM;  // MIS quantity used for vertex merging
+};
 struct VCMTreeEntry :
     public SimpleKDNode<Point, VCMVertex> {
 	public:
@@ -133,12 +144,7 @@ class VCMIntegrator : public Integrator {
 		Path* emitterPath = new Path();
 		emitterPath->initialize(scene, time, EImportance, m_pool);
 		emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
-
-		Float dVCM = 0;
-		Float dVC = 0;
-		Float dVM = 0;
-		bool isFiniteLight = true;
-		Spectrum throughput;
+		SubPathState pathState;
 
 		// skip Emitter Supernode
 		for(int vertexIdx = 1; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
@@ -163,7 +169,7 @@ class VCMIntegrator : public Integrator {
 			const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
 			Float lightPickProb = scene->pdfEmitterDiscrete(emitter);
 
-			isFiniteLight = !(emitter->getType() & AbstractEmitter::EDeltaDirection);
+			pathState.mIsFiniteLight = !(emitter->getType() & AbstractEmitter::EDeltaDirection);
 
 			Vector wo = emitterPath->vertex(2)->getPosition() - pRec.p;
 			Float dist = wo.length(); wo /= dist;
@@ -175,16 +181,15 @@ class VCMIntegrator : public Integrator {
 			Float emissionPdf = emitter->pdfDirection(dRec, pRec) * lightPickProb;
 			//Log(EInfo, "Direct= %f, emission= %f", directPdf, emissionPdf);
 
-			throughput = vertex->weight[ERadiance] / emissionPdf;
+			pathState.mThroughput = vertex->weight[ERadiance] / emissionPdf;
 
-			dVCM = directPdf / emissionPdf;
+			pathState.dVCM = directPdf / emissionPdf;
 
 			// TODO: handle delta and infinite lights
-			dVC = cosTheta / emissionPdf;
-			dVM = dVC * misVCWeightFactor;
+			pathState.dVC = cosTheta / emissionPdf;
+			pathState.dVM = pathState.dVC * misVCWeightFactor;
 		    }
 		    else {
-			// TODO: handle infinite light
 			// there's much more to computing MIS values here
 			// (SampleScattering @ SmallVCM)
 			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
@@ -195,15 +200,16 @@ class VCMIntegrator : public Integrator {
 			DirectSamplingRecord dRec(its);
 
 			// is this the right cos angle to compute?
+			// should it be dRec.n instead?
 			Float cosTheta = std::abs(dot(dRec.d, dRec.refN));
 
-			if (isFiniteLight) {
-			    dVCM *= its.t * its.t;
+			if (vertexIdx > 2 || pathState.mIsFiniteLight) {
+			    pathState.dVCM *= its.t * its.t;
 			}
 
-			dVCM /= cosTheta;
-			dVC  /= cosTheta;
-			dVM  /= cosTheta;
+			pathState.dVCM /= cosTheta;
+			pathState.dVC  /= cosTheta;
+			pathState.dVM  /= cosTheta;
 
 			const BSDF* bsdf = its.getBSDF();
 
@@ -212,9 +218,9 @@ class VCMIntegrator : public Integrator {
 			if ( !(bsdf->getType() & BSDF::EDiffuseReflection
 				    || bsdf->getType() & BSDF::EDiffuseTransmission) ) {
 			    VCMVertex v( vertex->getPosition(),
-				 throughput,
+				 pathState.mThroughput,
 				 vertexIdx - 1,
-				 dVCM, dVC, dVM, its.getBSDF() );
+				 pathState.dVCM, pathState.dVC, pathState.dVM, its.getBSDF() );
 			    m_lightVertices.push_back(v);
 			}
 		    }
