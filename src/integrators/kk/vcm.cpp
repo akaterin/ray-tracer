@@ -137,6 +137,7 @@ class VCMIntegrator : public Integrator {
 		Float dVCM = 0;
 		Float dVC = 0;
 		Float dVM = 0;
+		bool isFiniteLight = true;
 		Spectrum throughput;
 
 		// skip Emitter Supernode
@@ -146,24 +147,37 @@ class VCMIntegrator : public Integrator {
 			continue;
 		    }
 
-			Log(EInfo, "after bRec");
-		    // if it's on sensor, sample MIS values
+		    // if it's on emitter, sample MIS values
 		    if (vertexIdx == 1 && emitterPath->vertexCount() > 2) {
+			PathVertexPtr nextVertex = emitterPath->vertex(2);
+			if (! (nextVertex -> getType() & PathVertex::ESurfaceInteraction) ) {
+			    break;
+			}
 			PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
 
 			Assert( vertex->type & PathVertex::EEmitterSample );
-			// ewentualnie its.Le( vertex[1] - vertex[0] ) Returns radiance emitted into direction d.
-			Float emissionPdf = emitterPath->vertex(0)->pdf[EImportance];
-			// not sure if it's direct right now :/
-			Float directPdf = pRec.pdf;
-			Log(EInfo, "Direct= %f, emission= %f", directPdf, emissionPdf);
-			throughput = vertex->weight[ERadiance] / emissionPdf;
+			//PathEdge* path = emitterPath->edge(1);
 
-			dVCM = directPdf / emissionPdf;
+			//Float emissionPdf = path->pdf[ERadiance];
+			//Float directPdf = pRec.pdf; //scene->pdfEmitterDirect(dRec);
+			const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
+			Float lightPickProb = scene->pdfEmitterDiscrete(emitter);
+
+			isFiniteLight = !(emitter->getType() & AbstractEmitter::EDeltaDirection);
 
 			Vector wo = emitterPath->vertex(2)->getPosition() - pRec.p;
 			Float dist = wo.length(); wo /= dist;
 			Float cosTheta = std::abs(dot(pRec.n, wo));
+
+			DirectionSamplingRecord dRec(wo, ESolidAngle);
+
+			Float directPdf = emitter->pdfPosition(pRec) * lightPickProb;
+			Float emissionPdf = emitter->pdfDirection(dRec, pRec) * lightPickProb;
+			//Log(EInfo, "Direct= %f, emission= %f", directPdf, emissionPdf);
+
+			throughput = vertex->weight[ERadiance] / emissionPdf;
+
+			dVCM = directPdf / emissionPdf;
 
 			// TODO: handle delta and infinite lights
 			dVC = cosTheta / emissionPdf;
@@ -174,26 +188,35 @@ class VCMIntegrator : public Integrator {
 			// there's much more to computing MIS values here
 			// (SampleScattering @ SmallVCM)
 			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
-			    Log(EInfo, "Other vertex type: %d", vertex->getType());
+			//    Log(EInfo, "Other vertex type: %d", vertex->getType());
 			    continue;
 			}
 			const Intersection &its = vertex->getIntersection();
 			DirectSamplingRecord dRec(its);
-			BSDFSamplingRecord bRec(its, its.toLocal(dRec.d));
 
-			dVCM *= its.t * its.t;
+			// is this the right cos angle to compute?
+			Float cosTheta = std::abs(dot(dRec.d, dRec.refN));
 
-			dVCM /= std::abs(bRec.wi.z);
-			dVC  /= std::abs(bRec.wi.z);
-			dVM  /= std::abs(bRec.wi.z);
+			if (isFiniteLight) {
+			    dVCM *= its.t * its.t;
+			}
 
-			VCMVertex v( vertex->getPosition(),
-				     throughput,
-				     vertexIdx - 1,
-				     dVCM, dVC, dVM, its.getBSDF() );
-			// TODO: don't store those values if BSDF
-			// is purely specular
-			m_lightVertices.push_back(v);
+			dVCM /= cosTheta;
+			dVC  /= cosTheta;
+			dVM  /= cosTheta;
+
+			const BSDF* bsdf = its.getBSDF();
+
+			// add vertex iff the bsdf is not purely specular
+			// not sure if thats how you check it ;)
+			if ( !(bsdf->getType() & BSDF::EDiffuseReflection
+				    || bsdf->getType() & BSDF::EDiffuseTransmission) ) {
+			    VCMVertex v( vertex->getPosition(),
+				 throughput,
+				 vertexIdx - 1,
+				 dVCM, dVC, dVM, its.getBSDF() );
+			    m_lightVertices.push_back(v);
+			}
 		    }
 		}
 
