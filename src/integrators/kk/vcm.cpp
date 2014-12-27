@@ -190,15 +190,54 @@ class VCMIntegrator : public Integrator {
 			pathState.dVM = pathState.dVC * misVCWeightFactor;
 		    }
 		    else {
-			// there's much more to computing MIS values here
-			// (SampleScattering @ SmallVCM)
 			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
 			//    Log(EInfo, "Other vertex type: %d", vertex->getType());
 			    continue;
 			}
+
 			const Intersection &its = vertex->getIntersection();
 			DirectSamplingRecord dRec(its);
+			const BSDF* bsdf = its.getBSDF();
+			// computing SampleScattering PDF values here since we
+			// already have a computed path
+			if ( emitterPath->vertexCount() > vertexIdx + 1 ) {
+			    PathVertexPtr nextVertex = emitterPath->vertex(vertexIdx + 1);
+			    Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
+			    Vector wo = nextVertex->getPosition() - dRec.p;
+			    Float dist = wo.length(); wo /= dist;
+			    cosThetaOut = std::abs(dot(dRec.n, wo));
+			    BSDFSamplingRecord bsdfRec(its, wo);
+			    bsdfDirPdfW = bsdf->pdf(bsdfRec);
 
+			    // same for specular
+			    if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
+				bsdfRevPdfW = bsdfDirPdfW;
+			    } else { // differs for non-specular
+				bsdfRec.reverse();
+				bsdfRevPdfW = bsdf->pdf(bsdfRec);
+			    }
+
+			    // TODO: Russian roulette factor
+
+			    if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
+				pathState.dVCM = 0.f;
+				assert(bsdfDirPdfW == bsdfRevPdfW);
+				pathState.dVC *= cosThetaOut;
+				pathState.dVM *= cosThetaOut;
+				pathState.mSpecularPath = true;
+			    } else {
+				pathState.dVC = (cosThetaOut / bsdfDirPdfW) * (
+					pathState.dVC * bsdfRevPdfW +
+					pathState.dVCM + misVMWeightFactor);
+
+				pathState.dVM = (cosThetaOut / bsdfDirPdfW) * (
+					pathState.dVM * bsdfRevPdfW +
+					pathState.dVCM * misVCWeightFactor + 1.f);
+
+				pathState.dVCM = 1.f / bsdfDirPdfW;
+				pathState.mSpecularPath = false;
+			    }
+			}
 			// is this the right cos angle to compute?
 			// should it be dRec.n instead?
 			Float cosTheta = std::abs(dot(dRec.d, dRec.refN));
@@ -211,12 +250,10 @@ class VCMIntegrator : public Integrator {
 			pathState.dVC  /= cosTheta;
 			pathState.dVM  /= cosTheta;
 
-			const BSDF* bsdf = its.getBSDF();
 
 			// add vertex iff the bsdf is not purely specular
 			// not sure if thats how you check it ;)
-			if ( !(bsdf->getType() & BSDF::EDiffuseReflection
-				    || bsdf->getType() & BSDF::EDiffuseTransmission) ) {
+			if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
 			    VCMVertex v( vertex->getPosition(),
 				 pathState.mThroughput,
 				 vertexIdx - 1,
@@ -224,6 +261,7 @@ class VCMIntegrator : public Integrator {
 			    m_lightVertices.push_back(v);
 			}
 		    }
+
 		}
 
 		connectToEye(scene, time, emitterPath);
