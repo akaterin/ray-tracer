@@ -35,10 +35,10 @@ struct VCMVertex {
 
     // Stores all required local information, including incoming direction.
     // TODO: will it boom as it's a pointer?
-    const BSDF* mBsdf;
     Float dVCM; // MIS quantity used for vertex connection and merging
     Float dVC;  // MIS quantity used for vertex connection
     Float dVM;  // MIS quantity used for vertex merging
+    const BSDF* mBsdf;
 };
 
 // to make easier to carry those values around
@@ -120,15 +120,19 @@ class VCMIntegrator : public Integrator {
 	    const Float radius = 1e-4;
 	    const Float radiusSqr = radius * radius;
 
+	    scene->initializeBidirectional();
 	    ref<Sensor> sensor = scene->getSensor();
-	    const Film *film = sensor->getFilm();
+	    Film *film = sensor->getFilm();
 	    const Vector2i res = film->getSize();
 	    scene->getSampler()->advance();
 	    int pathCount = res.x*res.y;
 
-	    const Float etaVCM = (M_PI * radiusSqr) * pathCount;
-	    const Float misVMWeightFactor = etaVCM;
-	    const Float misVCWeightFactor = 1.f / etaVCM;
+	    mBitmap = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, film->getSize());
+	    mBitmap->clear();
+
+	    mEtaVCM = (M_PI * radiusSqr) * pathCount;
+	    mMisVMWeightFactor = mEtaVCM;
+	    mMisVCWeightFactor = 1.f / mEtaVCM;
 
 
 	    //////////////////////////////////////////////////////////////////////////
@@ -177,6 +181,8 @@ class VCMIntegrator : public Integrator {
 
 			DirectionSamplingRecord dRec(wo, ESolidAngle);
 
+			// I think it's area pdf here and should be
+			// solidAngle...
 			Float directPdf = emitter->pdfPosition(pRec) * lightPickProb;
 			Float emissionPdf = emitter->pdfDirection(dRec, pRec) * lightPickProb;
 			//Log(EInfo, "Direct= %f, emission= %f", directPdf, emissionPdf);
@@ -187,12 +193,12 @@ class VCMIntegrator : public Integrator {
 
 			// TODO: handle delta and infinite lights
 			pathState.dVC = cosTheta / emissionPdf;
-			pathState.dVM = pathState.dVC * misVCWeightFactor;
+			pathState.dVM = pathState.dVC * mMisVCWeightFactor;
 		    }
 		    else {
 			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
 			//    Log(EInfo, "Other vertex type: %d", vertex->getType());
-			    continue;
+			    break;
 			}
 
 			const Intersection &its = vertex->getIntersection();
@@ -200,44 +206,8 @@ class VCMIntegrator : public Integrator {
 			const BSDF* bsdf = its.getBSDF();
 			// computing SampleScattering PDF values here since we
 			// already have a computed path
-			if ( emitterPath->vertexCount() > vertexIdx + 1 ) {
-			    PathVertexPtr nextVertex = emitterPath->vertex(vertexIdx + 1);
-			    Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
-			    Vector wo = nextVertex->getPosition() - dRec.p;
-			    Float dist = wo.length(); wo /= dist;
-			    cosThetaOut = std::abs(dot(dRec.n, wo));
-			    BSDFSamplingRecord bsdfRec(its, wo);
-			    bsdfDirPdfW = bsdf->pdf(bsdfRec);
+			SampleScattering(pathState, bsdf, dRec, its, emitterPath, vertexIdx);
 
-			    // same for specular
-			    if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
-				bsdfRevPdfW = bsdfDirPdfW;
-			    } else { // differs for non-specular
-				bsdfRec.reverse();
-				bsdfRevPdfW = bsdf->pdf(bsdfRec);
-			    }
-
-			    // TODO: Russian roulette factor
-
-			    if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
-				pathState.dVCM = 0.f;
-				assert(bsdfDirPdfW == bsdfRevPdfW);
-				pathState.dVC *= cosThetaOut;
-				pathState.dVM *= cosThetaOut;
-				pathState.mSpecularPath = true;
-			    } else {
-				pathState.dVC = (cosThetaOut / bsdfDirPdfW) * (
-					pathState.dVC * bsdfRevPdfW +
-					pathState.dVCM + misVMWeightFactor);
-
-				pathState.dVM = (cosThetaOut / bsdfDirPdfW) * (
-					pathState.dVM * bsdfRevPdfW +
-					pathState.dVCM * misVCWeightFactor + 1.f);
-
-				pathState.dVCM = 1.f / bsdfDirPdfW;
-				pathState.mSpecularPath = false;
-			    }
-			}
 			// is this the right cos angle to compute?
 			// should it be dRec.n instead?
 			Float cosTheta = std::abs(dot(dRec.d, dRec.refN));
@@ -283,15 +253,97 @@ class VCMIntegrator : public Integrator {
 	    }
 
 
-	    for(int i = 0; i<pathCount; ++i) {
+
+	    /////////////////////////////////////////////////////////////////////////
+	    // GENERATE CAMERA PATHS
+	    /////////////////////////////////////////////////////////////////////////
+
+	    SubPathState pathState;
+	    Spectrum *target = (Spectrum *) mBitmap->getUInt8Data();
+	    for(int pathIdx = 0; pathIdx<pathCount; ++pathIdx) {
 		// Generate eye path
 		Path *sensorPath = new Path();
 		sensorPath->initialize(scene, 0, ERadiance, m_pool);
-		Point2i startPosition = Point2i(i % res.x, (i - i % res.x) / res.x);
-		//Log(EInfo,"%i %i %i", i, startPosition.x, startPosition.y);
-		//Sleep(100);
+		int currentX = pathIdx % res.x;
+		int currentY = pathIdx / res.x;
+		Point2i startPosition = Point2i(currentX, currentY);
 		sensorPath->randomWalkFromPixel(scene, scene->getSampler(), m_config.maxDepth, startPosition, m_config.rrDepth, m_pool);
-		scene->getSampler()->advance();
+
+		for (int vertexIdx = 1; vertexIdx < sensorPath->vertexCount(); vertexIdx++) {
+		    PathVertexPtr vertex = sensorPath->vertex(vertexIdx);
+
+		    if (vertexIdx == 1 && sensorPath->vertexCount() > 2) {
+			PathVertexPtr nextVertex = sensorPath->vertex(2);
+			if (! (nextVertex -> getType() & PathVertex::ESurfaceInteraction) ) {
+			    break;
+			}
+			PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
+
+			Assert( vertex->type & PathVertex::ESensorSample );
+
+			Vector wo = nextVertex->getPosition() - pRec.p;
+			Float dist = wo.length(); wo /= dist;
+
+			DirectionSamplingRecord dRec(wo, ESolidAngle);
+
+			Float cameraPdfW = dRec.pdf;
+
+			pathState.mSpecularPath = true;
+			pathState.mThroughput = Spectrum(1.0f);
+			pathState.dVCM = pathCount / cameraPdfW;
+			pathState.dVC = pathState.dVM = 0;
+		    } else {
+			if (vertex->isEmitterSample()) {
+			    PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
+			    const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
+			    Float lightPickProb = scene->pdfEmitterDiscrete(emitter);
+
+			    Vector wo = sensorPath->vertex(2)->getPosition() - pRec.p;
+			    Float dist = wo.length(); wo /= dist;
+
+			    DirectionSamplingRecord dRec(wo, ESolidAngle);
+
+			    Float directPdf = emitter->pdfPosition(pRec);
+			    Float emissionPdf = emitter->pdfDirection(dRec, pRec);
+			    Spectrum radiance = emitter->evalDirection(dRec, pRec);
+			    Spectrum color(0.0f);
+			    // we see light directly from camera
+			    // supernode->sensor->emitter
+			    if (vertexIdx == 2) {
+				// add color
+				color = radiance;
+			    } else {
+				directPdf *= lightPickProb;
+				emissionPdf *= lightPickProb;
+
+				const Float wSensor = directPdf * pathState.dVCM +
+				    emissionPdf * pathState.dVC;
+
+				const Float misWeight = 1.f / (1.f + wSensor);
+
+				color = misWeight * radiance;
+			    }
+			}
+			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
+			//    Log(EInfo, "Other vertex type: %d", vertex->getType());
+			    break;
+			}
+
+			const Intersection &its = vertex->getIntersection();
+			DirectSamplingRecord dRec(its);
+			const BSDF* bsdf = its.getBSDF();
+			SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
+
+			Float cosTheta = std::abs(dot(dRec.d, dRec.refN));
+
+			pathState.dVCM *= its.t * its.t;
+			pathState.dVCM /= cosTheta;
+			pathState.dVC  /= cosTheta;
+			pathState.dVM  /= cosTheta;
+		    }
+
+		}
+		    scene->getSampler()->advance();
 	    }
 
 
@@ -299,6 +351,9 @@ class VCMIntegrator : public Integrator {
 		paths[i]->release(m_pool);
 		delete paths[i];
 	    }
+
+	    film->setBitmap(mBitmap);
+	    queue->signalRefresh(job);
 
 	    return true;
 	}
@@ -325,11 +380,68 @@ class VCMIntegrator : public Integrator {
 
 	MTS_DECLARE_CLASS()
     private:
-	    ref<ParallelProcess> m_process;
-	    std::vector<VCMVertex> m_lightVertices;
-	    PointKDTree<VCMTreeEntry> m_tree;
-	    VCMConfiguration m_config;
-	    MemoryPool m_pool;
+
+	void SampleScattering(
+		SubPathState& pathState,
+		const BSDF* bsdf,
+		const DirectSamplingRecord& dRec,
+		const Intersection& its,
+		const Path* path,
+		int vertexIdx) {
+
+	    if ( path->vertexCount() > vertexIdx + 1 ) {
+		PathVertexPtr nextVertex = path->vertex(vertexIdx + 1);
+		Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
+		Vector wo = nextVertex->getPosition() - dRec.p;
+		Float dist = wo.length(); wo /= dist;
+		cosThetaOut = std::abs(dot(dRec.n, wo));
+		BSDFSamplingRecord bsdfRec(its, wo);
+		bsdfDirPdfW = bsdf->pdf(bsdfRec);
+
+		// same for specular
+		if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
+		    bsdfRevPdfW = bsdfDirPdfW;
+		} else { // differs for non-specular
+		    bsdfRec.reverse();
+		    bsdfRevPdfW = bsdf->pdf(bsdfRec);
+		}
+
+		// TODO: Russian roulette factor
+
+		if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
+		    pathState.dVCM = 0.f;
+		    assert(bsdfDirPdfW == bsdfRevPdfW);
+		    pathState.dVC *= cosThetaOut;
+		    pathState.dVM *= cosThetaOut;
+		    pathState.mSpecularPath = true;
+		} else {
+		    pathState.dVC = (cosThetaOut / bsdfDirPdfW) * (
+			    pathState.dVC * bsdfRevPdfW +
+			    pathState.dVCM + mMisVMWeightFactor);
+
+		    pathState.dVM = (cosThetaOut / bsdfDirPdfW) * (
+			    pathState.dVM * bsdfRevPdfW +
+			    pathState.dVCM * mMisVCWeightFactor + 1.f);
+
+		    pathState.dVCM = 1.f / bsdfDirPdfW;
+		    pathState.mSpecularPath = false;
+		}
+
+		pathState.mThroughput *= its.color * (cosThetaOut / bsdfDirPdfW);
+	    }
+	}
+
+	ref<ParallelProcess> m_process;
+	std::vector<VCMVertex> m_lightVertices;
+	PointKDTree<VCMTreeEntry> m_tree;
+	VCMConfiguration m_config;
+	MemoryPool m_pool;
+	ref<Bitmap> mBitmap;
+
+	Float mEtaVCM;
+	Float mMisVMWeightFactor;
+	Float mMisVCWeightFactor;
+
 };
 
 MTS_IMPLEMENT_CLASS_S(VCMIntegrator, false, Integrator)
