@@ -194,6 +194,9 @@ class VCMIntegrator : public Integrator {
 			// TODO: handle delta and infinite lights
 			pathState.dVC = cosTheta / emissionPdf;
 			pathState.dVM = pathState.dVC * mMisVCWeightFactor;
+
+			//Log(EInfo, "\n directPdf: %f\n emissionPdf: %f\n cosTheta: %f\n",
+			//	directPdf, emissionPdf, cosTheta);
 		    }
 		    else {
 			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
@@ -210,8 +213,7 @@ class VCMIntegrator : public Integrator {
 
 			// is this the right cos angle to compute?
 			// should it be dRec.n instead?
-			Float cosTheta = std::abs(dot(dRec.d, dRec.refN));
-
+			Float cosTheta = std::abs(dot(-its.wi, vertex->getGeometricNormal()));
 			if (vertexIdx > 2 || pathState.mIsFiniteLight) {
 			    pathState.dVCM *= its.t * its.t;
 			}
@@ -252,6 +254,7 @@ class VCMIntegrator : public Integrator {
 		m_tree.push_back(m_lightVertices[i]);
 	    }
 
+	    Log(EInfo, "Built the tree");
 
 
 	    /////////////////////////////////////////////////////////////////////////
@@ -269,12 +272,15 @@ class VCMIntegrator : public Integrator {
 		Point2i startPosition = Point2i(currentX, currentY);
 		sensorPath->randomWalkFromPixel(scene, scene->getSampler(), m_config.maxDepth, startPosition, m_config.rrDepth, m_pool);
 
-		for (int vertexIdx = 1; vertexIdx < sensorPath->vertexCount(); vertexIdx++) {
+		// watch out for the "-1" part. I don't count the last vertex
+		// since it doesn't have w_0 vector
+		for (int vertexIdx = 1; vertexIdx < sensorPath->vertexCount() - 1; vertexIdx++) {
 		    PathVertexPtr vertex = sensorPath->vertex(vertexIdx);
 
 		    if (vertexIdx == 1 && sensorPath->vertexCount() > 2) {
 			PathVertexPtr nextVertex = sensorPath->vertex(2);
-			if (! (nextVertex -> getType() & PathVertex::ESurfaceInteraction) ) {
+			if (! (nextVertex-> getType() & PathVertex::ESurfaceInteraction) ) {
+			    Log(EInfo, "Other vertex type: %x", vertex->getType());
 			    break;
 			}
 			PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
@@ -293,24 +299,44 @@ class VCMIntegrator : public Integrator {
 			pathState.dVCM = pathCount / cameraPdfW;
 			pathState.dVC = pathState.dVM = 0;
 		    } else {
+			if (! (vertex->getType() & PathVertex::ESurfaceInteraction ||
+				    vertex->isEmitterSample()) ) {
+			    Log(EInfo, "Other vertex type and not emitter: %d", vertex->getType());
+			    break;
+			}
+
+			const Intersection &its = vertex->getIntersection();
+			DirectSamplingRecord dRec(its);
+			const BSDF* bsdf = its.getBSDF();
+			SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
+
+			Float cosTheta = std::abs(dot(-its.wi, vertex->getGeometricNormal()));
+
+			pathState.dVCM *= its.t * its.t;
+			pathState.dVCM /= cosTheta;
+			pathState.dVC  /= cosTheta;
+			pathState.dVM  /= cosTheta;
+
+			Spectrum color(0.0f);
+			// Case #1 - we hit the light
 			if (vertex->isEmitterSample()) {
 			    PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
 			    const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
 			    Float lightPickProb = scene->pdfEmitterDiscrete(emitter);
 
-			    Vector wo = sensorPath->vertex(2)->getPosition() - pRec.p;
-			    Float dist = wo.length(); wo /= dist;
+			    Vector wi = pRec.p - sensorPath->vertex(vertexIdx-1)->getPosition();
+			    Float dist = wi.length(); wi /= dist;
 
-			    DirectionSamplingRecord dRec(wo, ESolidAngle);
+			    DirectionSamplingRecord dRec(-wi, ESolidAngle);
 
 			    Float directPdf = emitter->pdfPosition(pRec);
 			    Float emissionPdf = emitter->pdfDirection(dRec, pRec);
-			    Spectrum radiance = emitter->evalDirection(dRec, pRec);
-			    Spectrum color(0.0f);
+			    dRec.measure = EArea;
+			    // WARNING: There be dragons
+			    Spectrum radiance = GetLightRadiance(emitter, its, -wi);
 			    // we see light directly from camera
 			    // supernode->sensor->emitter
 			    if (vertexIdx == 2) {
-				// add color
 				color = radiance;
 			    } else {
 				directPdf *= lightPickProb;
@@ -321,25 +347,75 @@ class VCMIntegrator : public Integrator {
 
 				const Float misWeight = 1.f / (1.f + wSensor);
 
-				color = misWeight * radiance;
+				color = pathState.mThroughput * misWeight * radiance;
 			    }
+			    target[currentY * mBitmap->getWidth() + currentX] += color;
+			    float pX, pY, pZ;
+			    color.toSRGB(pX, pY, pZ);
+			    Log(EInfo, "Adding color %f %f %f on position (%d, %d)", pX, pY, pZ, currentX, currentY);
 			}
-			if (! (vertex->getType() & PathVertex::ESurfaceInteraction) ) {
-			//    Log(EInfo, "Other vertex type: %d", vertex->getType());
-			    break;
+			// Case #2 - Vertex Connection - connect to light
+			// source
+			if ( !(bsdf->getType() & BSDF::EDelta) ) {
+			    Sampler *sampler = scene->getSampler();
+			    ref_vector<Emitter>& emitters = scene->getEmitters();
+			    ref<Emitter> sampledEmitter = emitters[emitters.size() * sampler->next1D()];
+			    Float lightPickProb = 1.0f / (emitters.size());
+
+			    Point2 randomPoint = sampler->next2D();
+			    PositionSamplingRecord emitterPRec;
+			    sampledEmitter->samplePosition(emitterPRec, randomPoint);
+			    Point emitterPoint = emitterPRec.p;
+			    Vector dirToLight = emitterPoint - its.p;
+			    Float dist = dirToLight.length(); dirToLight /= dist;
+
+			    Spectrum radiance = GetLightRadiance(sampledEmitter, its, dirToLight);
+			    //Log(EInfo, "Radiance %s", radiance.toString().c_str());
+
+			    if (radiance != Spectrum(0.0f)) {
+				Float cosNormalDir = dot(emitterPRec.n, -dirToLight);
+
+				Float directPdfW = emitterPRec.pdf * dist * dist / cosNormalDir;
+				Float emissionPdfW = emitterPRec.pdf * cosNormalDir * INV_PI;
+
+				PathVertexPtr nextVertex = sensorPath->vertex(vertexIdx + 1);
+				Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
+				cosThetaOut = std::abs(dot(dRec.refN, dirToLight));
+				BSDFSamplingRecord bsdfRec(its, dirToLight);
+
+				Spectrum bsdfFactor = bsdf->eval(bsdfRec);
+				if (bsdfFactor == Spectrum(0.0f)) {
+				    //Log(EInfo, "bsdf factor 0, breaking");
+				    continue;
+				}
+				bsdfDirPdfW = bsdf->pdf(bsdfRec);
+
+				bsdfRec.reverse();
+				bsdfRevPdfW = bsdf->pdf(bsdfRec);
+				Float continuationProbability = (Float) 0.95f;
+
+				if ( sampledEmitter->isDegenerate() ) {
+				    bsdfDirPdfW = 0.0f;
+				}
+
+				bsdfDirPdfW *= continuationProbability;
+				bsdfRevPdfW *= continuationProbability;
+				Float wLight = bsdfDirPdfW / (lightPickProb * directPdfW);
+				Float wCamera = (emissionPdfW * cosThetaOut / (directPdfW * cosNormalDir)
+					* (mMisVMWeightFactor + pathState.dVCM + pathState.dVC * bsdfRevPdfW));
+				//Log(EInfo, "\n  emissionPdfW: %f\n  cosThetaOut: %f\n  directPdfW: %f\n  cosNormalDir: %f\n  mMisVMWeightFactor: %f\n  dVCM: %f\n  dVC: %f\n  bsdfRevPdfW: %f\n", emissionPdfW, cosThetaOut, directPdfW, cosNormalDir, mMisVMWeightFactor, pathState.dVCM, pathState.dVC, bsdfRevPdfW);
+				Float misWeight = 1.f / (wLight + 1.f + wCamera);
+				Spectrum contrib = (misWeight * cosThetaOut / (lightPickProb * directPdfW)) * (radiance * bsdfFactor);
+				color = pathState.mThroughput * contrib;
+				target[currentY * mBitmap->getWidth() + currentX] += color;
+				//Log(EInfo, "\n  wLight: %f\n  wCamera: %f\n  misWeight: %f\n  cosThetaOut: %f\n  lightPickProb: %f\n  directPdfW: %f\n  radiance: %s\n  bsdfFactor: %s\n", wLight, wCamera, misWeight, cosThetaOut, lightPickProb, directPdfW, radiance.toString().c_str(), bsdfFactor.toString().c_str());
+				//Log(EInfo, "bsdfDirPdfW: %f\n bsdfRevPdfW: %f\n contProb: %f\n lightPickProb: %f\n, directPdfW: %f\n emissionPdfW: %f\n cosThetaOut: %f\n cosNormalDir: %f\n", bsdfDirPdfW, bsdfRevPdfW, continuationProbability, lightPickProb, directPdfW, emissionPdfW, cosThetaOut, cosNormalDir);
+				//Log(EInfo, "Adding color %s, contrib: %s, througput: %s on position (%d, %d)", color.toString().c_str(), contrib.toString().c_str(), pathState.mThroughput.toString().c_str(), currentX, currentY);
+				film->setBitmap(mBitmap);
+				queue->signalRefresh(job);
+			    }
+
 			}
-
-			const Intersection &its = vertex->getIntersection();
-			DirectSamplingRecord dRec(its);
-			const BSDF* bsdf = its.getBSDF();
-			SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
-
-			Float cosTheta = std::abs(dot(dRec.d, dRec.refN));
-
-			pathState.dVCM *= its.t * its.t;
-			pathState.dVCM /= cosTheta;
-			pathState.dVC  /= cosTheta;
-			pathState.dVM  /= cosTheta;
 		    }
 
 		}
@@ -352,10 +428,21 @@ class VCMIntegrator : public Integrator {
 		delete paths[i];
 	    }
 
+
+	    Log(EInfo, "DONE!");
 	    film->setBitmap(mBitmap);
 	    queue->signalRefresh(job);
 
 	    return true;
+	}
+
+	Spectrum GetLightRadiance(const Emitter* emitter, const Intersection& its, const Vector& d) {
+	    Spectrum radiance(0.0f);
+	    try {
+		radiance = emitter->eval(its, d);
+	    } catch(...) {
+	    }
+	    return radiance;
 	}
 
 	bool connectToEye(Scene *scene, Float time, Path *emitterPath) {
@@ -389,12 +476,13 @@ class VCMIntegrator : public Integrator {
 		const Path* path,
 		int vertexIdx) {
 
+	    PathVertexPtr vertex = path->vertex(vertexIdx);
 	    if ( path->vertexCount() > vertexIdx + 1 ) {
 		PathVertexPtr nextVertex = path->vertex(vertexIdx + 1);
 		Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
-		Vector wo = nextVertex->getPosition() - dRec.p;
+		Vector wo = nextVertex->getPosition() - vertex->getPosition();
 		Float dist = wo.length(); wo /= dist;
-		cosThetaOut = std::abs(dot(dRec.n, wo));
+		cosThetaOut = std::abs(dot(vertex->getGeometricNormal(), wo));
 		BSDFSamplingRecord bsdfRec(its, wo);
 		bsdfDirPdfW = bsdf->pdf(bsdfRec);
 
@@ -427,7 +515,9 @@ class VCMIntegrator : public Integrator {
 		    pathState.mSpecularPath = false;
 		}
 
-		pathState.mThroughput *= its.color * (cosThetaOut / bsdfDirPdfW);
+		//Log(EInfo, "cosThetaOut: %f, bsdfDirPdfW: %f, color: %s",
+		//	cosThetaOut, bsdfDirPdfW, its.color.toString().c_str());
+		pathState.mThroughput *= bsdf->eval(bsdfRec) * (cosThetaOut / bsdfDirPdfW);
 	    }
 	}
 
