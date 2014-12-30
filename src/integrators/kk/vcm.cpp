@@ -10,7 +10,7 @@
 
 MTS_NAMESPACE_BEGIN
 
-typedef PathVertex*		  PathVertexPtr;
+typedef PathVertex* PathVertexPtr;
 //    typedef VCMKDTree::IndexType    IndexType;
 //    typedef VCMKDTree::SearchResult SearchResult;
 
@@ -21,17 +21,20 @@ enum EVCMVertexData {
 };
 
 struct VCMVertex {
-    VCMVertex() {}
-    VCMVertex(const Point &p, const Spectrum& throughput,
-	    uint32_t pathLength, float dvcm, float dvc, float dvm,
-	    const BSDF* bsdf) :
-	mPosition(p), mThroughput(throughput),
-	mPathLength(pathLength), dVCM(dvcm),
-	dVC(dvc), dVM(dvm), mBsdf(bsdf)
-    {}
+    VCMVertex() {
+    }
+
+    VCMVertex(const Point &p, const Spectrum &throughput,
+            uint32_t pathLength, float dvcm, float dvc, float dvm,
+            const BSDF *bsdf) :
+            mPosition(p), mThroughput(throughput),
+            mPathLength(pathLength), dVCM(dvcm),
+            dVC(dvc), dVM(dvm), mBsdf(bsdf) {
+    }
+
     Point mPosition;
     Spectrum mThroughput; // Path throughput (including emission)
-    uint32_t  mPathLength; // Number of segments between source and vertex
+    uint32_t mPathLength; // Number of segments between source and vertex
 
     // Stores all required local information, including incoming direction.
     // TODO: will it boom as it's a pointer?
@@ -42,29 +45,32 @@ struct VCMVertex {
 };
 
 // to make easier to carry those values around
-struct SubPathState
-{
+struct SubPathState {
     Spectrum mThroughput;         // Path throughput
-    bool  mIsFiniteLight;
-    bool  mSpecularPath;
+    bool mIsFiniteLight;
+    bool mSpecularPath;
 
     Float dVCM; // MIS quantity used for vertex connection and merging
     Float dVC;  // MIS quantity used for vertex connection
     Float dVM;  // MIS quantity used for vertex merging
 };
-struct VCMTreeEntry :
-    public SimpleKDNode<Point, VCMVertex> {
-	public:
-	    /// Dummy constructor
-	    inline VCMTreeEntry() {}
-	    inline VCMTreeEntry(const VCMVertex& v) {
-		position = v.mPosition;
-		data = v;
-	    }
 
-	    /// Return a string representation (for debugging)
-	    std::string toString() const {}
-    };
+struct VCMTreeEntry :
+        public SimpleKDNode<Point, VCMVertex> {
+public:
+    /// Dummy constructor
+    inline VCMTreeEntry() {
+    }
+
+    inline VCMTreeEntry(const VCMVertex &v) {
+        position = v.mPosition;
+        data = v;
+    }
+
+    /// Return a string representation (for debugging)
+    std::string toString() const {
+    }
+};
 
 class VCMIntegrator : public Integrator {
     public:
@@ -139,8 +145,6 @@ class VCMIntegrator : public Integrator {
 	    // Generate light paths
 	    //////////////////////////////////////////////////////////////////////////
 
-	    std::vector<Path* > paths;
-	    paths.reserve(pathCount);
 	    m_lightVertices.reserve(pathCount);
 	    m_lightVertices.clear();
 	    for(int i = 0; i<pathCount; ++i) {
@@ -224,22 +228,21 @@ class VCMIntegrator : public Integrator {
 
 			// add vertex iff the bsdf is not purely specular
 			// not sure if thats how you check it ;)
-			if ( !(bsdf->getType() & BSDF::EDiffuse) ) {
+			if ( !(bsdf->getType() & BSDF::EDelta) ) {
 			    VCMVertex v( vertex->getPosition(),
 				 pathState.mThroughput,
 				 vertexIdx - 1,
 				 pathState.dVCM, pathState.dVC, pathState.dVM, its.getBSDF() );
 			    m_lightVertices.push_back(v);
 			}
+			if( !(bsdf->getType() & BSDF::EDelta) ){
+			   connectToEye(scene, time, emitterPath, pathState, vertexIdx);
+			}
 		    }
 
 		}
 
-		connectToEye(scene, time, emitterPath);
-
 		scene->getSampler()->advance();
-		//Pytanie czy ścieżki, których się nie udało połączyć z okiem też tu wrzucać?
-		paths.push_back(emitterPath);
 	    }
 
 	    Log(EInfo, "Starting to build...");
@@ -420,12 +423,6 @@ class VCMIntegrator : public Integrator {
 	    }
 
 
-	    for(int i = 0; i<pathCount; ++i){
-		paths[i]->release(m_pool);
-		delete paths[i];
-	    }
-
-
 	    Log(EInfo, "DONE!");
 	    film->setBitmap(mBitmap);
 	    queue->signalRefresh(job);
@@ -446,26 +443,55 @@ class VCMIntegrator : public Integrator {
 	    return radiance;
 	}
 
-	bool connectToEye(Scene *scene, Float time, Path *emitterPath) {
-	    int prevSize = emitterPath->vertexCount();
-	    Path* sensorPath = new Path();
-	    sensorPath->initialize(scene, time, ERadiance, m_pool);
-	    sensorPath->randomWalk(scene, scene->getSampler(), 1, 0, ERadiance, m_pool);
-	    PathVertex* vertexOnEye = sensorPath->vertex(1);
-	    PathVertex* succOnSensor = sensorPath->vertex(0);
-	    PathEdge* succEdge = sensorPath->edge(0);
-	    PathEdge* lastEdge = emitterPath->edge(emitterPath->edgeCount()-1);
-	    PathVertex* predLastVertex = emitterPath->vertexOrNull(emitterPath->vertexCount()-2);
-	    PathVertex* lastVertex = emitterPath->vertex(emitterPath->vertexCount()-1);
-	    PathEdge* newEgde = new PathEdge();
-	    bool succeded = PathVertex::connect(scene, predLastVertex, lastEdge, lastVertex, newEgde, vertexOnEye, succEdge, succOnSensor);
-	    if( !succeded )
-		return false;
-	    emitterPath->append(newEgde, vertexOnEye);
-	    emitterPath->append(succEdge, succOnSensor);
-	    return succeded;
-	}
+    bool connectToEye(Scene *scene, Float time, Path *emitterPath, SubPathState& pathState, int vertexIdx) {
+        int prevSize = emitterPath->vertexCount();
+        Path *sensorPath = new Path();
+        Path *emitterPathCopy = new Path();
+        emitterPath->clone(*emitterPathCopy, m_pool);
+        sensorPath->initialize(scene, time, ERadiance, m_pool);
+        sensorPath->randomWalk(scene, scene->getSampler(), 1, 0, ERadiance, m_pool);
 
+        PathVertex *vertexOnEye = sensorPath->vertex(1);
+        PathVertex *succOnSensor = sensorPath->vertex(0);
+        PathEdge *succEdge = sensorPath->edge(0);
+        PathEdge *lastEdge = emitterPathCopy->edge(vertexIdx - 1);
+        PathVertex *predLastVertex = emitterPathCopy->vertexOrNull(vertexIdx -1);
+        PathVertex *lastVertex = emitterPathCopy->vertex(vertexIdx);
+        PathEdge *newEgde = new PathEdge();
+
+        bool succeded = PathVertex::connect(scene, predLastVertex, lastEdge, lastVertex, newEgde, vertexOnEye, succEdge, succOnSensor);
+        if (!succeded) {
+            emitterPathCopy->release(m_pool);
+            delete sensorPath;
+            delete emitterPathCopy;
+            scene->getSampler()->advance();
+            return false;
+        }
+
+        emitterPathCopy->append(newEgde, vertexOnEye);
+        emitterPathCopy->append(succEdge, succOnSensor);
+
+        const Intersection &its = lastVertex->getIntersection();
+        const BSDF *bsdf = its.getBSDF();
+        DirectSamplingRecord dRec(its);
+        Vector wo = vertexOnEye->getPosition() - dRec.p;
+        Float dist = wo.length();
+        wo /= dist;
+        BSDFSamplingRecord bsdfRec(its, wo);
+        const Spectrum bsdfFactor = bsdf->eval(bsdfRec);
+        if(bsdfFactor.isZero())
+            return false;
+
+        Float continuationProbability = std::min(pathState.mThroughput.max(), (Float) 0.95f);
+        bsdfRec.reverse();
+        Float bsdfRevPdfW = bsdf->pdf(bsdfRec)*continuationProbability;
+
+        emitterPathCopy->release(m_pool);
+        delete sensorPath;
+        delete emitterPathCopy;
+        scene->getSampler()->advance();
+        return succeded;
+    }
 	MTS_DECLARE_CLASS()
     private:
 
@@ -533,9 +559,8 @@ class VCMIntegrator : public Integrator {
 	Float mEtaVCM;
 	Float mMisVMWeightFactor;
 	Float mMisVCWeightFactor;
-
 };
 
 MTS_IMPLEMENT_CLASS_S(VCMIntegrator, false, Integrator)
-    MTS_EXPORT_PLUGIN(VCMIntegrator, "Vertex Connection And Merging Integrator");
-    MTS_NAMESPACE_END
+MTS_EXPORT_PLUGIN(VCMIntegrator,"Vertex Connection And Merging Integrator");
+MTS_NAMESPACE_END
