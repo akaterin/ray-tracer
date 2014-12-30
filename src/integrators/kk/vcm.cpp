@@ -147,7 +147,7 @@ class VCMIntegrator : public Integrator {
 		Float time = i*1000;
 		Path* emitterPath = new Path();
 		emitterPath->initialize(scene, time, EImportance, m_pool);
-		emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool );
+		emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool);
 		SubPathState pathState;
 
 		// skip Emitter Supernode
@@ -171,7 +171,7 @@ class VCMIntegrator : public Integrator {
 			//Float emissionPdf = path->pdf[ERadiance];
 			//Float directPdf = pRec.pdf; //scene->pdfEmitterDirect(dRec);
 			const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
-			Float lightPickProb = scene->pdfEmitterDiscrete(emitter);
+			Float lightPickProb = LightPickProbability(scene);
 
 			pathState.mIsFiniteLight = !(emitter->getType() & AbstractEmitter::EDeltaDirection);
 
@@ -212,8 +212,7 @@ class VCMIntegrator : public Integrator {
 			SampleScattering(pathState, bsdf, dRec, its, emitterPath, vertexIdx);
 
 			// is this the right cos angle to compute?
-			// should it be dRec.n instead?
-			Float cosTheta = std::abs(dot(-its.wi, vertex->getGeometricNormal()));
+			Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
 			if (vertexIdx > 2 || pathState.mIsFiniteLight) {
 			    pathState.dVCM *= its.t * its.t;
 			}
@@ -310,7 +309,7 @@ class VCMIntegrator : public Integrator {
 			const BSDF* bsdf = its.getBSDF();
 			SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
 
-			Float cosTheta = std::abs(dot(-its.wi, vertex->getGeometricNormal()));
+			Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
 
 			pathState.dVCM *= its.t * its.t;
 			pathState.dVCM /= cosTheta;
@@ -322,7 +321,7 @@ class VCMIntegrator : public Integrator {
 			if (vertex->isEmitterSample()) {
 			    PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
 			    const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
-			    Float lightPickProb = scene->pdfEmitterDiscrete(emitter);
+			    Float lightPickProb = LightPickProbability(scene);
 
 			    Vector wi = pRec.p - sensorPath->vertex(vertexIdx-1)->getPosition();
 			    Float dist = wi.length(); wi /= dist;
@@ -331,7 +330,6 @@ class VCMIntegrator : public Integrator {
 
 			    Float directPdf = emitter->pdfPosition(pRec);
 			    Float emissionPdf = emitter->pdfDirection(dRec, pRec);
-			    dRec.measure = EArea;
 			    // WARNING: There be dragons
 			    Spectrum radiance = GetLightRadiance(emitter, its, -wi);
 			    // we see light directly from camera
@@ -350,9 +348,9 @@ class VCMIntegrator : public Integrator {
 				color = pathState.mThroughput * misWeight * radiance;
 			    }
 			    target[currentY * mBitmap->getWidth() + currentX] += color;
-			    float pX, pY, pZ;
-			    color.toSRGB(pX, pY, pZ);
-			    Log(EInfo, "Adding color %f %f %f on position (%d, %d)", pX, pY, pZ, currentX, currentY);
+			    queue->signalRefresh(job);
+			    Log(EInfo, "Woot, we hit the light!!!");
+			    Log(EInfo, "Adding color %s on position (%d, %d)", color.toString().c_str(), currentX, currentY);
 			}
 			// Case #2 - Vertex Connection - connect to light
 			// source
@@ -360,7 +358,7 @@ class VCMIntegrator : public Integrator {
 			    Sampler *sampler = scene->getSampler();
 			    ref_vector<Emitter>& emitters = scene->getEmitters();
 			    ref<Emitter> sampledEmitter = emitters[emitters.size() * sampler->next1D()];
-			    Float lightPickProb = 1.0f / (emitters.size());
+			    Float lightPickProb = LightPickProbability(scene);
 
 			    Point2 randomPoint = sampler->next2D();
 			    PositionSamplingRecord emitterPRec;
@@ -380,8 +378,8 @@ class VCMIntegrator : public Integrator {
 
 				PathVertexPtr nextVertex = sensorPath->vertex(vertexIdx + 1);
 				Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
-				cosThetaOut = std::abs(dot(dRec.refN, dirToLight));
-				BSDFSamplingRecord bsdfRec(its, dirToLight);
+				BSDFSamplingRecord bsdfRec(its, its.toLocal(dirToLight));
+				cosThetaOut = Frame::cosTheta(bsdfRec.wo);
 
 				Spectrum bsdfFactor = bsdf->eval(bsdfRec);
 				if (bsdfFactor == Spectrum(0.0f)) {
@@ -392,7 +390,7 @@ class VCMIntegrator : public Integrator {
 
 				bsdfRec.reverse();
 				bsdfRevPdfW = bsdf->pdf(bsdfRec);
-				Float continuationProbability = (Float) 0.95f;
+				Float continuationProbability = 1.0f / vertex->rrWeight;
 
 				if ( sampledEmitter->isDegenerate() ) {
 				    bsdfDirPdfW = 0.0f;
@@ -411,7 +409,6 @@ class VCMIntegrator : public Integrator {
 				//Log(EInfo, "\n  wLight: %f\n  wCamera: %f\n  misWeight: %f\n  cosThetaOut: %f\n  lightPickProb: %f\n  directPdfW: %f\n  radiance: %s\n  bsdfFactor: %s\n", wLight, wCamera, misWeight, cosThetaOut, lightPickProb, directPdfW, radiance.toString().c_str(), bsdfFactor.toString().c_str());
 				//Log(EInfo, "bsdfDirPdfW: %f\n bsdfRevPdfW: %f\n contProb: %f\n lightPickProb: %f\n, directPdfW: %f\n emissionPdfW: %f\n cosThetaOut: %f\n cosNormalDir: %f\n", bsdfDirPdfW, bsdfRevPdfW, continuationProbability, lightPickProb, directPdfW, emissionPdfW, cosThetaOut, cosNormalDir);
 				//Log(EInfo, "Adding color %s, contrib: %s, througput: %s on position (%d, %d)", color.toString().c_str(), contrib.toString().c_str(), pathState.mThroughput.toString().c_str(), currentX, currentY);
-				film->setBitmap(mBitmap);
 				queue->signalRefresh(job);
 			    }
 
@@ -434,6 +431,10 @@ class VCMIntegrator : public Integrator {
 	    queue->signalRefresh(job);
 
 	    return true;
+	}
+
+	Float LightPickProbability(const Scene *scene) {
+	    return 1.0f / scene->getEmitters().size();
 	}
 
 	Spectrum GetLightRadiance(const Emitter* emitter, const Intersection& its, const Vector& d) {
@@ -482,8 +483,8 @@ class VCMIntegrator : public Integrator {
 		Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
 		Vector wo = nextVertex->getPosition() - vertex->getPosition();
 		Float dist = wo.length(); wo /= dist;
-		cosThetaOut = std::abs(dot(vertex->getGeometricNormal(), wo));
-		BSDFSamplingRecord bsdfRec(its, wo);
+		BSDFSamplingRecord bsdfRec(its, its.toLocal(wo));
+		cosThetaOut = Frame::cosTheta(bsdfRec.wo);
 		bsdfDirPdfW = bsdf->pdf(bsdfRec);
 
 		// same for specular
@@ -515,9 +516,10 @@ class VCMIntegrator : public Integrator {
 		    pathState.mSpecularPath = false;
 		}
 
-		//Log(EInfo, "cosThetaOut: %f, bsdfDirPdfW: %f, color: %s",
-		//	cosThetaOut, bsdfDirPdfW, its.color.toString().c_str());
+		Log(EInfo, "cosThetaOut: %f, bsdfDirPdfW: %f, bsdf: %s",
+			cosThetaOut, bsdfDirPdfW, bsdf->eval(bsdfRec).toString().c_str());
 		pathState.mThroughput *= bsdf->eval(bsdfRec) * (cosThetaOut / bsdfDirPdfW);
+		//Log(EInfo, "Throughput: %s", pathState.mThroughput.toString().c_str());
 	    }
 	}
 
