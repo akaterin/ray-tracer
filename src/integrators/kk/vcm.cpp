@@ -140,7 +140,7 @@ public:
 
 		const Float radiusAlpha = 0.75f;
 
-		for (int iterationNum = 0; iterationNum < 5; iterationNum++) {
+		for (int iterationNum = 0; iterationNum < 20; iterationNum++) {
 
 		Float radius = 0.003f;
 		radius /= std::pow(Float(iterationNum + 1), 0.5f * (1 - radiusAlpha));
@@ -335,13 +335,15 @@ public:
 					Spectrum color(0.0f);
 					// Case #1 - we hit the light
 					if (its.isEmitter()) {
-						Spectrum radiance = its.Le(-its.wi);
+						Spectrum radiance = its.Le(its.toWorld(-its.wi));
 						Spectrum color = pathState.mThroughput * radiance;
 						// we see light directly from camera
 						// supernode->sensor->emitter
 						if (vertexIdx == 2) {
 							Log(EInfo, "Radiance emitter in direction %s: %s", (-its.wi).toString().c_str(),
 								radiance.toString().c_str());
+							//Log(EInfo, "Radiance emitter in opposite direction %s: %s", (its.wi).toString().c_str(),
+							//	radiance.toString().c_str());
 							target[currentY * mBitmap->getWidth() + currentX] += color;
 						} else {
 							// TO BE IMPLEMENTED
@@ -403,6 +405,8 @@ public:
 					if (!(bsdf->getType() & BSDF::EDelta)) {
 						Spectrum color = ConnectToLight(pathState, sensorPath, vertexIdx, its, bsdf);
 						target[currentY * mBitmap->getWidth() + currentX] += color;
+					} else {
+						Log(EInfo, "Delta BSDF, cant do VC");
 					}
 
 					// Case #3 - Vertex Connection - Connect to light vertices
@@ -530,69 +534,79 @@ public:
 
 	Spectrum ConnectToLight(SubPathState &pathState, Path *sensorPath, int vertexIdx, const Intersection& its, const BSDF* bsdf) {
 		PathVertexPtr vertex = sensorPath->vertex(vertexIdx);
-		ref_vector <Emitter> &emitters = mScene->getEmitters();
-		ref <Emitter> sampledEmitter = emitters[emitters.size() * mScene->getSampler()->next1D()];
 		Float lightPickProb = LightPickProbability();
 
 		Point2 randomPoint = mScene->getSampler()->next2D();
-		PositionSamplingRecord emitterPRec;
-		sampledEmitter->samplePosition(emitterPRec, randomPoint);
-		Point emitterPoint = emitterPRec.p;
-		Vector dirToLight = emitterPoint - its.p;
-		Float dist = dirToLight.length();
-		dirToLight /= dist;
 
 		Spectrum color(0.0f);
-		Spectrum radiance = GetLightRadiance(sampledEmitter, its, dirToLight);
-		//Log(EInfo, "Radiance %s", radiance.toString().c_str());
+
+		DirectSamplingRecord dRec(its);
+		Spectrum radiance = mScene->sampleEmitterDirect(dRec, randomPoint, true);
+		radiance *= dRec.pdf;
 
 		if (radiance.isZero()) {
 			return color;
 		}
-		Float cosNormalDir = dot(emitterPRec.n, -dirToLight);
 
-		Float directPdfW = emitterPRec.pdf * dist * dist / cosNormalDir;
-		Float emissionPdfW = emitterPRec.pdf * cosNormalDir * INV_PI;
+		Float cosAtLight = dot(dRec.n, -dRec.d);
+		const Emitter *sampledEmitter = static_cast<const Emitter *>(dRec.object);
+		PositionSamplingRecord emitterPRec;
+		sampledEmitter->samplePosition(emitterPRec, randomPoint);
 
-		PathVertexPtr nextVertex = sensorPath->vertex(vertexIdx + 1);
-		Float bsdfRevPdfW, bsdfDirPdfW, cosThetaOut;
-		BSDFSamplingRecord bsdfRec(its, its.toLocal(dirToLight));
-		cosThetaOut = std::abs(Frame::cosTheta(bsdfRec.wo));
+		Vector dirToLight = dRec.p - its.p;
+		Float dist = dirToLight.length();
+		dirToLight /= dist;
+
+		Float directPdfW = emitterPRec.pdf * dRec.dist * dRec.dist / cosAtLight;
+		Float emissionPdfW = emitterPRec.pdf * cosAtLight * INV_PI;
+
+		Float bsdfRevPdfW, bsdfDirPdfW, cosToLight;
+		BSDFSamplingRecord bsdfRec(its, its.toLocal(dRec.d), ERadiance);
+		cosToLight = std::abs(Frame::cosTheta(bsdfRec.wo));
 
 		Spectrum bsdfFactor = bsdf->eval(bsdfRec);
 		if (bsdfFactor.isZero()) {
 			return color;
 		}
-		bsdfDirPdfW = bsdf->pdf(bsdfRec);
 
+		bsdfDirPdfW = bsdf->pdf(bsdfRec);
 		bsdfRec.reverse();
 		bsdfRevPdfW = bsdf->pdf(bsdfRec);
+
 		Float continuationProbability = 1.0f / vertex->rrWeight;
 
 		if (sampledEmitter->isDegenerate()) {
 			bsdfDirPdfW = 0.0f;
 		}
 
-		bsdfDirPdfW *= continuationProbability;
-		bsdfRevPdfW *= continuationProbability;
+		//bsdfDirPdfW *= continuationProbability;
+		//bsdfRevPdfW *= continuationProbability;
 		Float wLight = bsdfDirPdfW / (lightPickProb * directPdfW);
-		Float wCamera = (emissionPdfW * cosThetaOut / (directPdfW * cosNormalDir)
+		Float wCamera = (emissionPdfW * cosToLight / (directPdfW * cosAtLight)
 				* (mMisVMWeightFactor + pathState.dVCM + pathState.dVC * bsdfRevPdfW));
-		//Log(EInfo, "\n  emissionPdfW: %f\n  cosThetaOut: %f\n  directPdfW: %f\n  cosNormalDir: %f\n  mMisVMWeightFactor: %f\n  dVCM: %f\n  dVC: %f\n  bsdfRevPdfW: %f\n", emissionPdfW, cosThetaOut, directPdfW, cosNormalDir, mMisVMWeightFactor, pathState.dVCM, pathState.dVC, bsdfRevPdfW);
+		//Log(EInfo, "\n  emissionPdfW: %f\n  cosToLight: %f\n  directPdfW: %f\n  cosAtLight: %f\n  mMisVMWeightFactor: %f\n  dVCM: %f\n  dVC: %f\n  bsdfRevPdfW: %f\n", emissionPdfW, cosToLight, directPdfW, cosAtLight, mMisVMWeightFactor, pathState.dVCM, pathState.dVC, bsdfRevPdfW);
 		Float misWeight = 1.f / (wLight + 1.f + wCamera);
 		Spectrum contrib = (misWeight / (lightPickProb * directPdfW)) * (radiance * bsdfFactor);
 		color = pathState.mThroughput * contrib;
 
 		return color;
-		//Log(EInfo, "\n  misWeight: %f\n  cosThetaOut: %f\n  lightPickProb: %f\n  directPdfW: %f\n  radiance: %s\n  bsdfFactor: %s\n", misWeight, cosThetaOut, lightPickProb, directPdfW, radiance.toString().c_str(), bsdfFactor.toString().c_str());
-		//Log(EInfo, "bsdfDirPdfW: %f\n bsdfRevPdfW: %f\n contProb: %f\n lightPickProb: %f\n, directPdfW: %f\n emissionPdfW: %f\n cosThetaOut: %f\n cosNormalDir: %f\n", bsdfDirPdfW, bsdfRevPdfW, continuationProbability, lightPickProb, directPdfW, emissionPdfW, cosThetaOut, cosNormalDir);
-		//Log(EInfo, "Adding color %s, contrib: %s, througput: %s on position (%d, %d)", color.toString().c_str(), contrib.toString().c_str(), pathState.mThroughput.toString().c_str(), currentX, currentY);
 	}
 
-	Spectrum GetLightRadiance(const Emitter *emitter, const Intersection &its, const Vector &d) {
+	Spectrum GetLightRadiance(const Emitter *emitter, const Intersection &its, const Vector &d, Float *cosAtLight = NULL) {
 		Spectrum radiance(0.0f);
 		try {
-			radiance = emitter->eval(its, d);
+			Ray r(its.p, -d, 0);
+			Intersection lightIts;
+			mScene->rayIntersect(r, lightIts);
+			if (lightIts.isValid() && !lightIts.isEmitter()) {
+				//Log(EInfo, "Point %s is not an emitter", lightIts.p.toString().c_str());
+			}
+			if (lightIts.isValid() && lightIts.isEmitter()) {
+				radiance = emitter->eval(lightIts, d);
+				if (cosAtLight) {
+					*cosAtLight = dot(lightIts.shFrame.n, d);
+				}
+			}
 		} catch (...) {
 		}
 		return radiance;
