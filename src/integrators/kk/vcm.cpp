@@ -248,7 +248,7 @@ public:
 							m_lightVertices.push_back(v);
 						}
 						if (!(bsdf->getType() & BSDF::EDelta)) {
-							connectToEye(scene, time, emitterPath, pathState, vertexIdx);
+							connectToEye(scene, time, emitterPath, pathState, vertexIdx, iterationNum);
 						}
 
 						SampleScattering(pathState, bsdf, dRec, its, emitterPath, vertexIdx);
@@ -325,13 +325,6 @@ public:
 							Log(EInfo, "Other vertex type and not emitter: %d", vertex->getType());
 							break;
 						}
-
-						const Intersection &its = vertex->getIntersection();
-						DirectSamplingRecord dRec(its);
-						const BSDF *bsdf = its.getBSDF();
-
-						SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
-						Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
 
 						const Intersection &its = vertex->getIntersection();
 						DirectSamplingRecord dRec(its);
@@ -625,7 +618,7 @@ public:
 		return radiance;
 	}
 
-	bool connectToEye(Scene *scene, Float time, Path *emitterPath, SubPathState &pathState, int vertexIdx) {
+	bool connectToEye(Scene *scene, Float time, Path *emitterPath, SubPathState &pathState, int vertexIdx, int iterationNum) {
 		int prevSize = emitterPath->vertexCount();
 		Path *sensorPath = new Path();
 		Path *emitterPathCopy = new Path();
@@ -705,9 +698,8 @@ public:
 		if (!contrib.isZero()) {
 			//TODO is occuled
 
-			Spectrum *target = (Spectrum *) mBitmap->getUInt8Data();
 			//Log(EInfo, "x: %f, y: %f", imagePos.x, imagePos.y);
-			target[(int(imagePos.y)) * mBitmap->getWidth() + int(imagePos.x)] += contrib;
+			accumulateColor(imagePos.x, imagePos.y, contrib, iterationNum);
 		}
 
 		emitterPathCopy->release(m_pool);
