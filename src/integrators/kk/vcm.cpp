@@ -4,8 +4,8 @@
 #include <mitsuba/bidir/path.h>
 #include <vector>
 #include <utility>
+#include <cmath>
 
-#include <unistd.h>
 
 #include "vcm.h"
 
@@ -26,7 +26,7 @@ struct VCMVertex {
 	VCMVertex() {
 	}
 
-	VCMVertex(const Point &p, const Intersection& intersection,
+	VCMVertex(const Point &p, const Intersection &intersection,
 			const Spectrum &throughput, uint32_t pathLength,
 			float dvcm, float dvc, float dvm,
 			const BSDF *bsdf) :
@@ -134,49 +134,51 @@ public:
 		const Vector2i res = film->getSize();
 		scene->getSampler()->advance();
 		int pathCount = res.x * res.y;
+		mLightSubPathCount = float(res.x * res.y);
 
 		mBitmap = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, film->getSize());
 		mBitmap->clear();
+
 
 		const Float radiusAlpha = 0.75f;
 
 		for (int iterationNum = 0; iterationNum < 20; iterationNum++) {
 
-		Float radius = 0.3f;
-		radius /= std::pow(Float(iterationNum + 1), 0.5f * (1 - radiusAlpha));
-		const Float radiusSqr = radius * radius;
+			Float radius = 0.3f;
+			radius /= std::pow(Float(iterationNum + 1), 0.5f * (1 - radiusAlpha));
+			const Float radiusSqr = radius * radius;
 
-		Log(EInfo, "Scene BSphere radius: %f", scene->getBSphere().radius);
-		Log(EInfo, "VCM Radius %f", radius);
+			Log(EInfo, "Scene BSphere radius: %f", scene->getBSphere().radius);
+			Log(EInfo, "VCM Radius %f", radius);
 
-		mEtaVCM = (M_PI * radiusSqr) * pathCount;
-		mMisVMWeightFactor = 0.0f; //mEtaVCM;
-		mMisVCWeightFactor = 1.f / mEtaVCM;
+			mEtaVCM = (M_PI * radiusSqr) * pathCount;
+			mMisVMWeightFactor = 0.0f; //mEtaVCM;
+			mMisVCWeightFactor = 1.f / mEtaVCM;
 
 
-		Log(EInfo, "pathCount: %d", pathCount);
-		Log(EInfo, "etaVCM: %f\nVM Weight: %f\nVC Weight: %f\n", mEtaVCM, mMisVMWeightFactor, mMisVCWeightFactor);
-		//////////////////////////////////////////////////////////////////////////
-		// Generate light paths
-		//////////////////////////////////////////////////////////////////////////
+			Log(EInfo, "pathCount: %d", pathCount);
+			Log(EInfo, "etaVCM: %f\nVM Weight: %f\nVC Weight: %f\n", mEtaVCM, mMisVMWeightFactor, mMisVCWeightFactor);
+			//////////////////////////////////////////////////////////////////////////
+			// Generate light paths
+			//////////////////////////////////////////////////////////////////////////
 
-		m_lightVertices.reserve(pathCount);
-		m_pathEnds.reserve(pathCount);
-		m_lightVertices.clear();
-		m_pathEnds.clear();
-		for (int i = 0; i < pathCount; ++i) {
-			Float time = i * 1000;
-			Path *emitterPath = new Path();
-			emitterPath->initialize(scene, time, EImportance, m_pool);
-			emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool);
-			SubPathState pathState;
+			m_lightVertices.reserve(pathCount);
+			m_pathEnds.reserve(pathCount);
+			m_lightVertices.clear();
+			m_pathEnds.clear();
+			for (int i = 0; i < pathCount; ++i) {
+				Float time = i * 1000;
+				Path *emitterPath = new Path();
+				emitterPath->initialize(scene, time, EImportance, m_pool);
+				emitterPath->randomWalk(scene, scene->getSampler(), m_config.maxDepth, m_config.rrDepth, EImportance, m_pool);
+				SubPathState pathState;
 
-			// skip Emitter Supernode
-			for (int vertexIdx = 1; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
-				PathVertexPtr vertex = emitterPath->vertex(vertexIdx);
-				if (!(vertex->type & PathVertex::ENormal)) {
-					continue;
-				}
+				// skip Emitter Supernode
+				for (int vertexIdx = 1; vertexIdx < emitterPath->vertexCount(); vertexIdx++) {
+					PathVertexPtr vertex = emitterPath->vertex(vertexIdx);
+					if (!(vertex->type & PathVertex::ENormal)) {
+						continue;
+					}
 
 				// if it's on emitter, sample MIS values
 				if (vertexIdx == 1 && emitterPath->vertexCount() > 2) {
@@ -184,242 +186,244 @@ public:
 					if (!(nextVertex->getType() & PathVertex::ESurfaceInteraction)) {
 						break;
 					}
-					PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
 
-					Assert(vertex->type & PathVertex::EEmitterSample);
-					//PathEdge* path = emitterPath->edge(1);
-
-					//Float emissionPdf = path->pdf[ERadiance];
-					//Float directPdf = pRec.pdf; //scene->pdfEmitterDirect(dRec);
-					const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
-					Float lightPickProb = LightPickProbability();
-
-					pathState.mIsFiniteLight = !(emitter->getType() & AbstractEmitter::EDeltaDirection);
-
-					Vector wo = emitterPath->vertex(2)->getPosition() - pRec.p;
-					Float dist = wo.length();
-					wo /= dist;
-					Float cosTheta = std::abs(dot(pRec.n, wo));
-
-					DirectionSamplingRecord dRec(wo, ESolidAngle);
-
-					Float directPdf = emitter->pdfPosition(pRec) * lightPickProb;
-					Float emissionPdf = directPdf * emitter->pdfDirection(dRec, pRec) * lightPickProb;
-
-					pathState.mThroughput = vertex->weight[ERadiance] / emissionPdf;
-
-					pathState.dVCM = directPdf / emissionPdf;
-
-					// TODO: handle delta and infinite lights
-					pathState.dVC = cosTheta / emissionPdf;
-					pathState.dVM = pathState.dVC * mMisVCWeightFactor;
-
-					//Log(EInfo, "\n directPdf: %f\n emissionPdf: %f\n cosTheta: %f\n",
-					//	directPdf, emissionPdf, cosTheta);
-				}
-				else {
-					if (!(vertex->getType() & PathVertex::ESurfaceInteraction)) {
-						//    Log(EInfo, "Other vertex type: %d", vertex->getType());
-						break;
-					}
-
-					const Intersection &its = vertex->getIntersection();
-					DirectSamplingRecord dRec(its);
-					const BSDF *bsdf = its.getBSDF();
-
-					Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
-					if (vertexIdx > 2 || pathState.mIsFiniteLight) {
-						pathState.dVCM *= its.t * its.t;
-					}
-
-					pathState.dVCM /= cosTheta;
-					pathState.dVC /= cosTheta;
-					pathState.dVM /= cosTheta;
-
-					if (!(bsdf->getType() & BSDF::EDelta)) {
-						VCMVertex v(vertex->getPosition(),
-								its,
-								pathState.mThroughput,
-								vertexIdx - 1,
-								pathState.dVCM, pathState.dVC, pathState.dVM, its.getBSDF());
-						m_lightVertices.push_back(v);
-					}
-					if (!(bsdf->getType() & BSDF::EDelta)) {
-						//connectToEye(scene, time, emitterPath, pathState, vertexIdx);
-					}
-
-					SampleScattering(pathState, bsdf, dRec, its, emitterPath, vertexIdx);
-				}
-
-			}
-
-			m_pathEnds[i] = (int)m_lightVertices.size();
-			scene->getSampler()->advance();
-		}
-
-		Log(EInfo, "Starting to build...");
-		/////////////////////////////////////////////////////////////////////////
-		// BUILD SEARCH STRUCT
-		/////////////////////////////////////////////////////////////////////////
-
-		m_tree.reserve(pathCount);
-		m_tree.clear();
-		for (int i = 0; i < m_lightVertices.size(); i++) {
-			m_tree.push_back(m_lightVertices[i]);
-		}
-
-		Log(EInfo, "Built the tree, it has %d vertices", m_tree.size());
-
-
-		/////////////////////////////////////////////////////////////////////////
-		// GENERATE CAMERA PATHS
-		/////////////////////////////////////////////////////////////////////////
-
-		SubPathState pathState;
-
-
-		for (int pathIdx = 0; pathIdx < pathCount; ++pathIdx) {
-			// Generate eye path
-			Path *sensorPath = new Path();
-			sensorPath->initialize(scene, 0, ERadiance, m_pool);
-			int currentX = pathIdx % res.x;
-			int currentY = pathIdx / res.x;
-			Point2i pixelPosition = Point2i(currentX, currentY);
-
-			sensorPath->randomWalkFromPixel(scene, scene->getSampler(), m_config.maxDepth, pixelPosition, m_config.rrDepth, m_pool);
-
-			for (int vertexIdx = 1; vertexIdx < sensorPath->vertexCount() - 1; vertexIdx++) {
-				PathVertexPtr vertex = sensorPath->vertex(vertexIdx);
-
-				if (vertexIdx == 1 && sensorPath->vertexCount() > 2) {
-					PathVertexPtr nextVertex = sensorPath->vertex(2);
-					if (!(nextVertex->getType() & PathVertex::ESurfaceInteraction)) {
-						Log(EInfo, "Other vertex type: %x", vertex->getType());
-						break;
-					}
-					PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
-
-					Assert(vertex->type & PathVertex::ESensorSample);
-
-					Vector wo = nextVertex->getPosition() - pRec.p;
-					Float dist = wo.length();
-					wo /= dist;
-
-					DirectionSamplingRecord dRec(wo, ESolidAngle);
-
-					const PerspectiveCamera* sensor =
-						static_cast<const PerspectiveCamera*>(vertex->getAbstractEmitter());
-
-					Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
-
-					Float cameraPdfW = imagePlaneDist * sensor->pdfDirection(dRec, pRec);
-
-					pathState.mSpecularPath = true;
-					pathState.mThroughput = Spectrum(1.0f);
-					pathState.dVCM = pathCount / cameraPdfW;
-					pathState.dVC = pathState.dVM = 0;
-				} else {
-					if (!(vertex->getType() & PathVertex::ESurfaceInteraction ||
-							vertex->isEmitterSample())) {
-						Log(EInfo, "Other vertex type and not emitter: %d", vertex->getType());
-						break;
-					}
-
-					const Intersection &its = vertex->getIntersection();
-					DirectSamplingRecord dRec(its);
-					const BSDF *bsdf = its.getBSDF();
-
-					SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
-					Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
-
-					pathState.dVCM *= its.t * its.t;
-					pathState.dVCM /= cosTheta;
-					pathState.dVC /= cosTheta;
-					pathState.dVM /= cosTheta;
-
-					Spectrum color(0.0f);
-					// Case #1 - we hit the light
-					if (its.isEmitter()) {
-						Spectrum radiance = its.Le(its.toWorld(-its.wi));
-						color += pathState.mThroughput * radiance;
-						// we see light directly from camera
-						// supernode->sensor->emitter
-						if (vertexIdx == 2) {
-							Log(EInfo, "Radiance emitter in direction %s: %s", (-its.wi).toString().c_str(),
-								radiance.toString().c_str());
-							//Log(EInfo, "Radiance emitter in opposite direction %s: %s", (its.wi).toString().c_str(),
-							//	radiance.toString().c_str());
-						} else {
-							// TO BE IMPLEMENTED
-						}
-					}
-					if (false && (its.isValid() && its.isEmitter())) {
 						PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
-						Log(EInfo, "Built pRec");
-						usleep(1000 * 1000);
-						const Emitter *emitter = static_cast<const Emitter *>(dRec.object);
-						Log(EInfo, "Got emitter handle");
-						usleep(1000 * 1000);
-						Log(EInfo, "%d", dRec.object);
-						usleep(1000 * 1000);
-						Log(EInfo, dRec.object->getClass()->getName().c_str());
-						usleep(1000 * 1000);
+
+						Assert(vertex->type & PathVertex::EEmitterSample);
+						//PathEdge* path = emitterPath->edge(1);
+
+						//Float emissionPdf = path->pdf[ERadiance];
+						//Float directPdf = pRec.pdf; //scene->pdfEmitterDirect(dRec);
+						const Emitter *emitter = static_cast<const Emitter *>(pRec.object);
 						Float lightPickProb = LightPickProbability();
 
-						Vector wi = pRec.p - sensorPath->vertex(vertexIdx - 1)->getPosition();
-						Float dist = wi.length();
-						wi /= dist;
+						pathState.mIsFiniteLight = !(emitter->getType() & AbstractEmitter::EDeltaDirection);
 
-						DirectionSamplingRecord dRec(-wi, ESolidAngle);
-						Log(EInfo, "Built dRec");
-						usleep(1000 * 1000);
+						Vector wo = emitterPath->vertex(2)->getPosition() - pRec.p;
+						Float dist = wo.length();
+						wo /= dist;
+						Float cosTheta = std::abs(dot(pRec.n, wo));
 
-						Float directPdf = emitter->pdfPosition(pRec);
-						Float emissionPdf = emitter->pdfDirection(dRec, pRec);
-						Log(EInfo, "Computed pdfs");
-						usleep(1000 * 1000);
-						// WARNING: There be dragons
-						Spectrum radiance = GetLightRadiance(emitter, its, -wi);
-						// we see light directly from camera
-						// supernode->sensor->emitter
-						if (vertexIdx == 2) {
-							color = radiance;
-						} else {
-							directPdf *= lightPickProb;
-							emissionPdf *= lightPickProb;
+						DirectionSamplingRecord dRec(wo, ESolidAngle);
 
-							const Float wSensor = directPdf * pathState.dVCM +
-									emissionPdf * pathState.dVC;
+						Float directPdf = emitter->pdfPosition(pRec) * lightPickProb;
+						Float emissionPdf = directPdf * emitter->pdfDirection(dRec, pRec) * lightPickProb;
 
-							const Float misWeight = 1.f / (1.f + wSensor);
+						pathState.mThroughput = vertex->weight[ERadiance] / emissionPdf;
 
-							color = pathState.mThroughput * misWeight * radiance;
+						pathState.dVCM = directPdf / emissionPdf;
+
+						// TODO: handle delta and infinite lights
+						pathState.dVC = cosTheta / emissionPdf;
+						pathState.dVM = pathState.dVC * mMisVCWeightFactor;
+
+						//Log(EInfo, "\n directPdf: %f\n emissionPdf: %f\n cosTheta: %f\n",
+						//	directPdf, emissionPdf, cosTheta);
+					}
+					else {
+						if (!(vertex->getType() & PathVertex::ESurfaceInteraction)) {
+							//    Log(EInfo, "Other vertex type: %d", vertex->getType());
+							break;
 						}
-						film->setBitmap(mBitmap);
-						queue->signalRefresh(job);
-						Log(EInfo, "Woot, we hit the light!!!");
-						Log(EInfo, "Adding color %s on position (%d, %d)", color.toString().c_str(), currentX, currentY);
-					}
-					// TODO: terminate if sub-path too long for
-					// connection/merging
 
-					// Case #2 - Vertex Connection - connect to light
-					// source
-					if (!(bsdf->getType() & BSDF::EDelta)) {
-						color += ConnectToLight(pathState, sensorPath, vertexIdx, its, bsdf);
+						const Intersection &its = vertex->getIntersection();
+						DirectSamplingRecord dRec(its);
+						const BSDF *bsdf = its.getBSDF();
+
+						Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
+						if (vertexIdx > 2 || pathState.mIsFiniteLight) {
+							pathState.dVCM *= its.t * its.t;
+						}
+
+						pathState.dVCM /= cosTheta;
+						pathState.dVC /= cosTheta;
+						pathState.dVM /= cosTheta;
+
+						if (!(bsdf->getType() & BSDF::EDelta)) {
+							VCMVertex v(vertex->getPosition(),
+									its,
+									pathState.mThroughput,
+									vertexIdx - 1,
+									pathState.dVCM, pathState.dVC, pathState.dVM, its.getBSDF());
+							m_lightVertices.push_back(v);
+						}
+						if (!(bsdf->getType() & BSDF::EDelta)) {
+							connectToEye(scene, time, emitterPath, pathState, vertexIdx);
+						}
+
+						SampleScattering(pathState, bsdf, dRec, its, emitterPath, vertexIdx);
+					}
+
+				}
+
+				m_pathEnds[i] = (int) m_lightVertices.size();
+				scene->getSampler()->advance();
+			}
+
+			Log(EInfo, "Starting to build...");
+			/////////////////////////////////////////////////////////////////////////
+			// BUILD SEARCH STRUCT
+			/////////////////////////////////////////////////////////////////////////
+
+			m_tree.reserve(pathCount);
+			m_tree.clear();
+			for (int i = 0; i < m_lightVertices.size(); i++) {
+				m_tree.push_back(m_lightVertices[i]);
+			}
+
+			Log(EInfo, "Built the tree, it has %d vertices", m_tree.size());
+
+
+			/////////////////////////////////////////////////////////////////////////
+			// GENERATE CAMERA PATHS
+			/////////////////////////////////////////////////////////////////////////
+
+			SubPathState pathState;
+			Spectrum *target = (Spectrum *) mBitmap->getUInt8Data();
+			for (int pathIdx = 0; pathIdx < pathCount; ++pathIdx) {
+				// Generate eye path
+				Path *sensorPath = new Path();
+				sensorPath->initialize(scene, 0, ERadiance, m_pool);
+				int currentX = pathIdx % res.x;
+				int currentY = pathIdx / res.x;
+				Point2i startPosition = Point2i(currentX, currentY);
+				sensorPath->randomWalkFromPixel(scene, scene->getSampler(), m_config.maxDepth, startPosition, m_config.rrDepth, m_pool);
+
+				for (int vertexIdx = 1; vertexIdx < sensorPath->vertexCount() - 1; vertexIdx++) {
+					PathVertexPtr vertex = sensorPath->vertex(vertexIdx);
+
+					if (vertexIdx == 1 && sensorPath->vertexCount() > 2) {
+						PathVertexPtr nextVertex = sensorPath->vertex(2);
+						if (!(nextVertex->getType() & PathVertex::ESurfaceInteraction)) {
+							Log(EInfo, "Other vertex type: %x", vertex->getType());
+							break;
+						}
+						PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
+
+						Assert(vertex->type & PathVertex::ESensorSample);
+
+						Vector wo = nextVertex->getPosition() - pRec.p;
+						Float dist = wo.length();
+						wo /= dist;
+
+						DirectionSamplingRecord dRec(wo, ESolidAngle);
+
+						const PerspectiveCamera* sensor =
+							static_cast<const PerspectiveCamera*>(vertex->getAbstractEmitter());
+
+						Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
+
+						Float cameraPdfW = imagePlaneDist * sensor->pdfDirection(dRec, pRec);
+
+						pathState.mSpecularPath = true;
+						pathState.mThroughput = Spectrum(1.0f);
+						pathState.dVCM = pathCount / cameraPdfW;
+						pathState.dVC = pathState.dVM = 0;
 					} else {
-						Log(EInfo, "Delta BSDF, cant do VC");
-					}
+						if (!(vertex->getType() & PathVertex::ESurfaceInteraction ||
+								vertex->isEmitterSample())) {
+							Log(EInfo, "Other vertex type and not emitter: %d", vertex->getType());
+							break;
+						}
 
-					// Case #3 - Vertex Connection - Connect to light vertices
-					if (!(bsdf->getType() & BSDF::EDelta)) {
-						int startingLightVertex = pathIdx == 0 ? 0 : m_pathEnds[pathIdx-1];
-						int lastLightVertex = m_pathEnds[pathIdx];
+						const Intersection &its = vertex->getIntersection();
+						DirectSamplingRecord dRec(its);
+						const BSDF *bsdf = its.getBSDF();
 
-						for (int i = startingLightVertex; i < lastLightVertex; i++) {
-							const VCMVertex& lightVertex = m_lightVertices[i];
+						SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
+						Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
 
-							// TODO: check min path length
+						const Intersection &its = vertex->getIntersection();
+						DirectSamplingRecord dRec(its);
+						const BSDF *bsdf = its.getBSDF();
+
+						SampleScattering(pathState, bsdf, dRec, its, sensorPath, vertexIdx);
+						Float cosTheta = std::abs(dot(its.toWorld(-its.wi), its.geoFrame.n));
+
+						pathState.dVCM *= its.t * its.t;
+						pathState.dVCM /= cosTheta;
+						pathState.dVC /= cosTheta;
+						pathState.dVM /= cosTheta;
+
+						Spectrum color(0.0f);
+						// Case #1 - we hit the light
+						if (its.isEmitter()) {
+							Spectrum radiance = its.Le(its.toWorld(-its.wi));
+							color += pathState.mThroughput * radiance;
+							// we see light directly from camera
+							// supernode->sensor->emitter
+							if (vertexIdx == 2) {
+								Log(EInfo, "Radiance emitter in direction %s: %s", (-its.wi).toString().c_str(),
+										radiance.toString().c_str());
+								//Log(EInfo, "Radiance emitter in opposite direction %s: %s", (its.wi).toString().c_str(),
+								//	radiance.toString().c_str());
+							} else {
+								// TO BE IMPLEMENTED
+							}
+						}
+						if (false && (its.isValid() && its.isEmitter())) {
+							PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
+							//Log(EInfo, "Built pRec");
+							const Emitter *emitter = static_cast<const Emitter *>(dRec.object);
+							//Log(EInfo, "Got emitter handle");
+							//Log(EInfo, "%d", dRec.object);
+							//Log(EInfo, dRec.object->getClass()->getName().c_str());
+							Float lightPickProb = LightPickProbability();
+
+							Vector wi = pRec.p - sensorPath->vertex(vertexIdx - 1)->getPosition();
+							Float dist = wi.length();
+							wi /= dist;
+
+							DirectionSamplingRecord dRec(-wi, ESolidAngle);
+							//Log(EInfo, "Built dRec");
+
+							Float directPdf = emitter->pdfPosition(pRec);
+							Float emissionPdf = emitter->pdfDirection(dRec, pRec);
+							//Log(EInfo, "Computed pdfs");
+							// WARNING: There be dragons
+							Spectrum radiance = GetLightRadiance(emitter, its, -wi);
+							// we see light directly from camera
+							// supernode->sensor->emitter
+							if (vertexIdx == 2) {
+								color = radiance;
+							} else {
+								directPdf *= lightPickProb;
+								emissionPdf *= lightPickProb;
+
+								const Float wSensor = directPdf * pathState.dVCM +
+										emissionPdf * pathState.dVC;
+
+								const Float misWeight = 1.f / (1.f + wSensor);
+
+								color = pathState.mThroughput * misWeight * radiance;
+							}
+							target[currentY * mBitmap->getWidth() + currentX] += color;
+							film->setBitmap(mBitmap);
+							queue->signalRefresh(job);
+							Log(EInfo, "Woot, we hit the light!!!");
+							Log(EInfo, "Adding color %s on position (%d, %d)", color.toString().c_str(), currentX, currentY);
+						}
+
+						// TODO: terminate if sub-path too long for
+						// connection/merging
+
+						// Case #2 - Vertex Connection - connect to light
+						// source
+						if (!(bsdf->getType() & BSDF::EDelta)) {
+							color += ConnectToLight(pathState, sensorPath, vertexIdx, its, bsdf);
+						} else {
+							Log(EInfo, "Delta BSDF, cant do VC");
+						}
+
+						// Case #3 - Vertex Connection - Connect to light vertices
+						if (!(bsdf->getType() & BSDF::EDelta)) {
+							int startingLightVertex = pathIdx == 0 ? 0 : m_pathEnds[pathIdx-1];
+							int lastLightVertex = m_pathEnds[pathIdx];
+
+							for (int i = startingLightVertex; i < lastLightVertex; i++) {
+								const VCMVertex &lightVertex = m_lightVertices[i];
+
+								// TODO: check min path length
 //							if (lightVertex.mPathLength + vertexIdx
 //									< mMinPathLength)
 //								continue;
@@ -430,18 +434,17 @@ public:
 
 							color += pathState.mThroughput * lightVertex.mThroughput *
 								ConnectVertices(pathState, vertex, lightVertex, its, bsdf);
+							}
 						}
+
+						accumulateColor(currentX, currentY, color, iterationNum);
+						film->setBitmap(mBitmap);
+						queue->signalRefresh(job);
 					}
-
-					accumulateColor(currentX, currentY, color, iterationNum);
-					film->setBitmap(mBitmap);
-					queue->signalRefresh(job);
 				}
+				scene->getSampler()->advance();
 			}
-			scene->getSampler()->advance();
-		}
-
-		Log(EInfo, "Done iteration %d", iterationNum + 1);
+			Log(EInfo, "Done iteration %d", iterationNum + 1);
 		}
 
 		Log(EInfo, "DONE!");
@@ -503,7 +506,7 @@ public:
 		}
 
 		Float cameraBsdfDirPdfA = pdfWtoA(cameraBsdfDirPdfW, dist, cosLight);
-		Float lightBsdfDirPdfA  = pdfWtoA(lightBsdfDirPdfW, dist, cosCamera);
+		Float lightBsdfDirPdfA = pdfWtoA(lightBsdfDirPdfW, dist, cosCamera);
 
 		Float wLight = cameraBsdfDirPdfA * (mMisVMWeightFactor + lightVertex.dVCM
 				+ lightVertex.dVC * lightBsdfRevPdfW);
@@ -537,7 +540,7 @@ public:
 		return 1.0f / mScene->getEmitters().size();
 	}
 
-	Spectrum ConnectToLight(SubPathState &pathState, Path *sensorPath, int vertexIdx, const Intersection& its, const BSDF* bsdf) {
+	Spectrum ConnectToLight(SubPathState &pathState, Path *sensorPath, int vertexIdx, const Intersection &its, const BSDF *bsdf) {
 		PathVertexPtr vertex = sensorPath->vertex(vertexIdx);
 		Float lightPickProb = LightPickProbability();
 
@@ -652,18 +655,60 @@ public:
 
 		const Intersection &its = lastVertex->getIntersection();
 		const BSDF *bsdf = its.getBSDF();
-		DirectSamplingRecord dRec(its);
+		const DirectSamplingRecord dRec(its);
 		Vector wo = vertexOnEye->getPosition() - dRec.p;
 		Float dist = wo.length();
 		wo /= dist;
-		BSDFSamplingRecord bsdfRec(its, wo);
+		BSDFSamplingRecord bsdfRec(its, its.toLocal(wo));
 		const Spectrum bsdfFactor = bsdf->eval(bsdfRec);
-		if (bsdfFactor.isZero())
+		if (bsdfFactor.isZero()) {
 			return false;
+		}
+		//not sure if it shouldn't be bsdfRec.wo.z
+		//Float cosToCamera = Frame::cosTheta(bsdfRec.wo);
+		Float cosToCamera = 1;
 
 		Float continuationProbability = std::min(pathState.mThroughput.max(), (Float) 0.95f);
 		bsdfRec.reverse();
 		Float bsdfRevPdfW = bsdf->pdf(bsdfRec) * continuationProbability;
+		const Float cosAtCamera = std::abs(dot(wo, its.geoFrame.n));
+		PerspectiveCamera *perspectiveCamera = dynamic_cast<PerspectiveCamera *>(scene->getSensor());
+		if (perspectiveCamera == 0) {
+			Log(EError, "Only perspective camera supported");
+		}
+
+		Transform viewTransform = perspectiveCamera->getViewTransform(0);
+		Transform cameraToSampleTransform = getCaneraToSample(scene, perspectiveCamera);
+		Point local = viewTransform(lastVertex->getPosition());
+		Point imagePos = cameraToSampleTransform(local);
+		const Vector2i res = scene->getSensor()->getFilm()->getSize();
+		if(imagePos.x < 0 || imagePos.y <0 || local.z < 0) {
+			return false;
+		}
+
+		imagePos.x = imagePos.x*res.x;
+		imagePos.y = imagePos.y*res.y;
+
+		const Float cameraImagePlaneDist = perspectiveCamera->getXFov();
+		const Float imagePointToCameraDist = cameraImagePlaneDist / cosAtCamera;
+		const Float imageToSolidAngleFactor = sqrt(imagePointToCameraDist) / cosAtCamera;
+		const Float imageToSurfaceFactor = imageToSolidAngleFactor * std::abs(cosToCamera) / sqrt(dist);
+
+		const Float cameraPdfA = imageToSurfaceFactor;
+		const Float wLight = (cameraPdfA / mLightSubPathCount) * (mMisVMWeightFactor + pathState.dVCM + pathState.dVC * bsdfRevPdfW);
+		const Float misWeight = 1.f / (1.f + wLight);
+		const Float surfaceToImageFactor = 1.f / imageToSurfaceFactor;
+		const Spectrum contrib = misWeight * pathState.mThroughput * bsdfFactor / (mLightSubPathCount * surfaceToImageFactor);
+		//Log(EInfo, "thtoughput: %s", pathState.mThroughput.toString().c_str());
+		//Log(EInfo, "misWeight: %f, surfaceToImageFactor: %f, bdsf: %s", misWeight, surfaceToImageFactor, contrib.toString().c_str());
+
+		if (!contrib.isZero()) {
+			//TODO is occuled
+
+			Spectrum *target = (Spectrum *) mBitmap->getUInt8Data();
+			//Log(EInfo, "x: %f, y: %f", imagePos.x, imagePos.y);
+			target[(int(imagePos.y)) * mBitmap->getWidth() + int(imagePos.x)] += contrib;
+		}
 
 		emitterPathCopy->release(m_pool);
 		delete sensorPath;
@@ -671,6 +716,31 @@ public:
 		scene->getSampler()->advance();
 		return succeded;
 	}
+
+	Transform getCaneraToSample(Scene* scene, const PerspectiveCamera* perspectiveCamera){
+		const Vector2i &filmSize   = scene->getSensor()->getFilm()->getSize();
+		const Vector2i &cropSize   = scene->getSensor()->getFilm()->getCropSize();
+		const Point2i  &cropOffset = scene->getSensor()->getFilm()->getCropOffset();
+		const Float aspect = scene->getSensor()->getAspect();
+		ProjectiveCamera *projectiveCamera = dynamic_cast<ProjectiveCamera *>(scene->getSensor());
+		Float nearClip = projectiveCamera->getNearClip();
+		Float farClip = projectiveCamera->getFarClip();
+		Float xFov = perspectiveCamera->getXFov();
+
+		Vector2 relSize((Float) cropSize.x / (Float) filmSize.x,
+				(Float) cropSize.y / (Float) filmSize.y);
+		Point2 relOffset((Float) cropOffset.x / (Float) filmSize.x,
+				(Float) cropOffset.y / (Float) filmSize.y);
+
+		Transform cameraToSample =
+				Transform::scale(Vector(1.0f / relSize.x, 1.0f / relSize.y, 1.0f))
+						* Transform::translate(Vector(-relOffset.x, -relOffset.y, 0.0f))
+						* Transform::scale(Vector(-0.5f, -0.5f*aspect, 1.0f))
+						* Transform::translate(Vector(-1.0f, -1.0f/aspect, 0.0f))
+						* Transform::perspective(xFov, nearClip, farClip);
+
+		return cameraToSample;
+ 	}
 
 	MTS_DECLARE_CLASS()
 
@@ -739,7 +809,7 @@ private:
 
 	ref <ParallelProcess> m_process;
 	std::vector <VCMVertex> m_lightVertices;
-	std::vector <int> m_pathEnds;
+	std::vector<int> m_pathEnds;
 	PointKDTree <VCMTreeEntry> m_tree;
 	VCMConfiguration m_config;
 	MemoryPool m_pool;
@@ -749,10 +819,9 @@ private:
 	Float mEtaVCM;
 	Float mMisVMWeightFactor;
 	Float mMisVCWeightFactor;
+	Float mLightSubPathCount;
 };
 
-MTS_IMPLEMENT_CLASS_S(VCMIntegrator,
-false, Integrator)
-MTS_EXPORT_PLUGIN(VCMIntegrator,
-"Vertex Connection And Merging Integrator");
+MTS_IMPLEMENT_CLASS_S(VCMIntegrator,false, Integrator)
+MTS_EXPORT_PLUGIN(VCMIntegrator,"Vertex Connection And Merging Integrator");
 MTS_NAMESPACE_END
