@@ -6,6 +6,7 @@
 #include <utility>
 #include <cmath>
 
+#include <unistd.h>
 
 #include "vcm.h"
 
@@ -136,7 +137,7 @@ public:
 		Film *film = sensor->getFilm();
 		const Vector2i res = film->getSize();
 		mSampler->advance();
-		int pathCount = res.x * res.y;
+		Float pathCount = res.x * res.y;
 		mLightSubPathCount = float(res.x * res.y);
 
 		mBitmap = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, film->getSize());
@@ -145,9 +146,9 @@ public:
 
 		const Float radiusAlpha = 0.75f;
 
-		for (int iterationNum = 0; iterationNum < 1; iterationNum++) {
+		for (int iterationNum = 0; iterationNum < 10; iterationNum++) {
 
-			Float radius = scene->getBSphere().radius * 0.0003f;
+			Float radius = scene->getBSphere().radius * 0.003f;
 			radius /= std::pow(Float(iterationNum + 1), 0.5f * (1 - radiusAlpha));
 			const Float radiusSqr = radius * radius;
 
@@ -159,17 +160,17 @@ public:
 			mMisVCWeightFactor = 1.f / mEtaVCM;
 
 
-			Log(EInfo, "pathCount: %d", pathCount);
+			Log(EInfo, "pathCount: %f", pathCount);
 			Log(EInfo, "etaVCM: %f\nVM Weight: %f\nVC Weight: %f\n", mEtaVCM, mMisVMWeightFactor, mMisVCWeightFactor);
 			//////////////////////////////////////////////////////////////////////////
 			// Generate light paths
 			//////////////////////////////////////////////////////////////////////////
 
-			/*m_lightVertices.reserve(pathCount);
+			m_lightVertices.reserve(pathCount);
 			m_pathEnds.reserve(pathCount);
 			m_lightVertices.clear();
 			m_pathEnds.clear();
-			for (int i = 0; i < pathCount; ++i) {
+			for (int i = 0; i < (int)pathCount; ++i) {
 				Float time = i * 1000;
 				Path *emitterPath = new Path();
 				emitterPath->initialize(scene, time, EImportance, m_pool);
@@ -266,7 +267,7 @@ public:
 			/////////////////////////////////////////////////////////////////////////
 			// BUILD SEARCH STRUCT
 			/////////////////////////////////////////////////////////////////////////
-
+/*
 			m_tree.reserve(pathCount);
 			m_tree.clear();
 			for (int i = 0; i < m_lightVertices.size(); i++) {
@@ -281,7 +282,7 @@ public:
 			/////////////////////////////////////////////////////////////////////////
 
 			SubPathState pathState;
-			for (int pathIdx = 0; pathIdx < pathCount; ++pathIdx) {
+			for (int pathIdx = 0; pathIdx < (int)pathCount; ++pathIdx) {
 				// Generate eye path
 				Path *sensorPath = new Path();
 				//sensorPath->initialize(scene, 0, ERadiance, m_pool);
@@ -290,8 +291,7 @@ public:
 				Point2i startPosition = Point2i(currentX, currentY);
 				Ray ray = generateCameraSample(pathState, pathIdx, pathCount);
 
-//				sensorPath->randomWalkFromPixel(scene, scene->getSampler(), m_config.maxDepth, startPosition, m_config.rrDepth, m_pool);
-
+				Spectrum color(0.0f);
 				for (;; pathState.mPathLength++) {
 					Intersection its;
 
@@ -312,23 +312,27 @@ public:
 					pathState.dVC /= cosTheta;
 					pathState.dVM /= cosTheta;
 
-					//Log(EInfo, "Before scattering d: %f, dVCM: %f, dVC: %f\n", its.t, pathState.dVCM, pathState.dVC);
-					Spectrum color(0.0f);
 					// Case #1 - we hit the light
 					if (its.isEmitter()) {
-						Spectrum radiance = its.Le(its.toWorld(-its.wi));
-						// we see light directly from camera
-						// supernode->sensor->emitter
+						Spectrum radiance = its.Le(its.wi);
+
 						if (pathState.mPathLength == 1) {
-							color += Spectrum(1.0f);
-							accumulateColor(currentX, currentY, color, iterationNum);
-							//Log(EInfo, "Radiance emitter in opposite direction %s: %s", (its.wi).toString().c_str(),
-							//	radiance.toString().c_str());
+							color += pathState.mThroughput * radiance;
 						} else {
-							//color += pathState.mThroughput * radiance;
-							//Log(EInfo, "Radiance emitter in direction %s: %s", (-its.wi).toString().c_str(),
-							//		radiance.toString().c_str());
-							// TO BE IMPLEMENTED
+							PositionSamplingRecord pRec(its);
+							DirectionSamplingRecord dRec(-ray.d, ESolidAngle);
+							const Emitter *emitter = its.shape->getEmitter();
+							Float directPdf = emitter->pdfPosition(pRec);
+							Float emissionPdf = emitter->pdfDirection(dRec, pRec);
+							Float lightPickProb = LightPickProbability();
+							directPdf *= lightPickProb;
+							emissionPdf *= lightPickProb;
+							const Float wSensor = directPdf * pathState.dVCM +
+								emissionPdf * pathState.dVC;
+
+							const Float misWeight = 1.f / (1.f + wSensor);
+
+							color += pathState.mThroughput * misWeight * radiance;
 						}
 						break;
 					}
@@ -336,52 +340,6 @@ public:
 					if (m_config.maxDepth != -1 && pathState.mPathLength >= m_config.maxDepth) {
 						break;
 					}
-					if (false && (its.isValid() && its.isEmitter())) {
-						/*
-						   PositionSamplingRecord pRec = vertex->getPositionSamplingRecord();
-						//Log(EInfo, "Built pRec");
-						//const Emitter *emitter = static_cast<const Emitter *>(dRec.object);
-						//Log(EInfo, "Got emitter handle");
-						//Log(EInfo, "%d", dRec.object);
-						//Log(EInfo, dRec.object->getClass()->getName().c_str());
-						Float lightPickProb = LightPickProbability();
-
-						Vector wi = pRec.p - sensorPath->vertex(vertexIdx - 1)->getPosition();
-						Float dist = wi.length();
-						wi /= dist;
-
-						DirectionSamplingRecord dRec(-wi, ESolidAngle);
-						//Log(EInfo, "Built dRec");
-
-						//Float directPdf = emitter->pdfPosition(pRec);
-						//Float emissionPdf = emitter->pdfDirection(dRec, pRec);
-						//Log(EInfo, "Computed pdfs");
-						// WARNING: There be dragons
-						//Spectrum radiance = GetLightRadiance(emitter, its, -wi);
-						// we see light directly from camera
-						// supernode->sensor->emitter
-						if (vertexIdx == 2) {
-						color = radiance;
-						} else {
-						directPdf *= lightPickProb;
-						emissionPdf *= lightPickProb;
-
-						const Float wSensor = directPdf * pathState.dVCM +
-						emissionPdf * pathState.dVC;
-
-						const Float misWeight = 1.f / (1.f + wSensor);
-
-						color = pathState.mThroughput * misWeight * radiance;
-						}
-						target[currentY * mBitmap->getWidth() + currentX] += color;
-						film->setBitmap(mBitmap);
-						queue->signalRefresh(job);
-						Log(EInfo, "Woot, we hit the light!!!");
-						Log(EInfo, "Adding color %s on position (%d, %d)", color.toString().c_str(), currentX, currentY);*/
-					}
-
-					// TODO: terminate if sub-path too long for
-					// connection/merging
 
 					// Case #2 - Vertex Connection - connect to light
 					// source
@@ -392,28 +350,22 @@ public:
 					}
 
 					// Case #3 - Vertex Connection - Connect to light vertices
-					if (false && !(bsdf->getType() & BSDF::EDelta)) {
+					if (!(bsdf->getType() & BSDF::EDelta)) {
 						int startingLightVertex = pathIdx == 0 ? 0 : m_pathEnds[pathIdx-1];
 						int lastLightVertex = m_pathEnds[pathIdx];
 
 						for (int i = startingLightVertex; i < lastLightVertex; i++) {
 							const VCMVertex &lightVertex = m_lightVertices[i];
 
-							// TODO: check min path length
-							//							if (lightVertex.mPathLength + vertexIdx
-							//									< mMinPathLength)
-							//								continue;
+							if (m_config.maxDepth != -1 &&
+								lightVertex.mPathLength + pathState.mPathLength > m_config.maxDepth)
+								break;
 
-							// TODO: check max path length
-							//if (lightVertex.mPathLength + vertexIdx > mMaxPathLength)
-							//	break;
-
-							//color += pathState.mThroughput * lightVertex.mThroughput *
-							//	ConnectVertices(pathState, vertex, lightVertex, its, bsdf);
+							color += pathState.mThroughput * lightVertex.mThroughput *
+								ConnectVertices(pathState, lightVertex, its, bsdf);
 						}
 					}
 
-					accumulateColor(currentX, currentY, color, iterationNum);
 					film->setBitmap(mBitmap);
 					queue->signalRefresh(job);
 					mSampler->advance();
@@ -421,6 +373,7 @@ public:
 						break;
 					}
 				}
+				accumulateColor(currentX, currentY, color, iterationNum);
 			}
 			Log(EInfo, "Done iteration %d", iterationNum + 1);
 			Log(EInfo, "0 radiance times: %d", zeroRadianceCount);
@@ -430,9 +383,10 @@ public:
 		return true;
 	}
 
-	Ray generateCameraSample(SubPathState& pathState, int pixelIndex, int pathCount) {
+	Ray generateCameraSample(SubPathState& pathState, int pixelIndex, Float pathCount) {
 		Ray ray;
-		Sensor *sensor = mScene->getSensor();
+		const PerspectiveCamera* sensor =
+			static_cast<const PerspectiveCamera*>(mScene->getSensor());
 		const Vector2i res = sensor->getFilm()->getSize();
 		int currentX = pixelIndex % res.x;
 		int currentY = pixelIndex / res.x;
@@ -448,13 +402,17 @@ public:
 		sensor->samplePosition(pRec, mSampler->next2D());
 		mSampler->advance();
 		DirectionSamplingRecord dRec(ray.d, ESolidAngle);
-		Float cameraPdfW = sensor->pdfDirection(dRec, pRec);
+
+		Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
+		Float cameraPdfW = imagePlaneDist * imagePlaneDist * sensor->pdfDirection(dRec, pRec);
 
 		pathState.mPathLength = 1;
 		pathState.mSpecularPath = true;
 		pathState.mThroughput = Spectrum(1.0f);
 		pathState.dVCM = pathCount / cameraPdfW;
 		pathState.dVC = pathState.dVM = 0;
+
+		Log(EInfo, "CameraPdfW = %f, pathCount = %f, dVCM = %f", cameraPdfW, pathCount, pathState.dVCM);
 
 		return ray;
 	}
@@ -468,7 +426,7 @@ public:
 			+ color * colorIterationFactor;
 	}
 
-	Spectrum ConnectVertices(SubPathState &pathState, PathVertexPtr vertex,
+	Spectrum ConnectVertices(SubPathState &pathState,
 			const VCMVertex &lightVertex, const Intersection &its, const BSDF *bsdf) {
 
 		Vector direction = lightVertex.mPosition - its.p;
@@ -481,6 +439,7 @@ public:
 		cosCamera = std::abs(Frame::cosTheta(bsdfRec.wo));
 
 		if (cameraBsdfFactor.isZero()) {
+			//Log(EInfo, "camera BSDF Factor is zero");
 			return Spectrum(0.0f);
 		}
 
@@ -488,7 +447,7 @@ public:
 		bsdfRec.reverse();
 		cameraBsdfRevPdfW = bsdf->pdf(bsdfRec);
 
-		Float continuationProbability = 1.0f / vertex->rrWeight;
+		Float continuationProbability = 1.0f;
 		//cameraBsdfRevPdfW *= continuationProbability;
 		//cameraBsdfDirPdfW *= continuationProbability;
 
@@ -502,14 +461,15 @@ public:
 		lightBsdfRevPdfW = lightVertex.mBsdf->pdf(lightBsdfRec);
 
 		// it's not the proper value - we have to get it from light vertex :(
-		Float lightCont = 1.0f / vertex->rrWeight;
+		Float lightCont = 1.0f;
 		//lightBsdfDirPdfW *= lightCont;
 		//lightBsdfRevPdfW *= lightCont;
 
 		Float geometryTerm = 1.0f / (dist * dist);
 
-		// Not sure how that's possible
-		if (geometryTerm < 0) {
+		// Not sure how that's possible.
+		if (cosCamera * cosLight < 0) {
+			//Log(EInfo, "cosCamera: %f, cosLight: %f", cosCamera, cosLight);
 			return Spectrum(0.0f);
 		}
 
@@ -524,9 +484,10 @@ public:
 
 		Float misWeight = 1.0f / (wLight + 1.0f + wCamera);
 
-		Spectrum contrib = (misWeight * geometryTerm) * cameraBsdfFactor * lightBsdfFactor;
+		Spectrum contrib = (geometryTerm * misWeight) * cameraBsdfFactor * lightBsdfFactor;
 
 		if (contrib.isZero() || occluded(its.p, direction, dist)) {
+			//Log(EInfo, "contrib: %s, if non-zero, occluded!", contrib.toString().c_str());
 			return Spectrum(0.0f);
 		}
 
@@ -609,7 +570,7 @@ public:
 		//Log(EInfo, "wLight: %f, wCamera: %f, emissionPdfW: %f, directPdfW: %f\ndVCM: %f, dVC: %f, bsdfRevPdfW: %f",
 		//	wLight, wCamera, emissionPdfW, directPdfW, pathState.dVCM, pathState.dVC, bsdfRevPdfW);
 		//Log(EInfo, "wLight: %f, wCamera: %f, misWeight: %f", wLight, wCamera, misWeight);
-		Spectrum contrib = (/*misWeight*/ 1.f / (lightPickProb * directPdfW)) * (radiance * bsdfFactor);
+		Spectrum contrib = (misWeight / (lightPickProb * directPdfW)) * (radiance * bsdfFactor);
 		color = pathState.mThroughput * contrib;
 
 		return color;
