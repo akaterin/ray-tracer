@@ -85,6 +85,10 @@ public:
 		m_config.maxDepth = props.getInteger("maxDepth", 10);
 		m_config.rrDepth = props.getInteger("rrDepth", 5);
 		m_config.iterationCount = props.getInteger("iterationCount", 5);
+		m_config.useVC = props.getBoolean("useVC", true);
+		m_config.useVM = props.getBoolean("useVM", false);
+		m_config.lightTraceOnly = props.getBoolean("lightTraceOnly", false);
+
 
 		m_config.dump();
 
@@ -140,10 +144,16 @@ public:
 		Float pathCount = res.x * res.y;
 		mLightSubPathCount = float(res.x * res.y);
 
+		mBitmaps.reserve(m_config.iterationCount);
+		for (int i = 0; i < m_config.iterationCount; i++) {
+			mBitmaps[i] = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, res);
+			mBitmaps[i]->clear();
+		}
+
 		mBitmap = new Bitmap(Bitmap::ESpectrum, Bitmap::EFloat, film->getSize());
 		mBitmap->clear();
 
-
+		film->setBitmap(mBitmap);
 		const Float radiusAlpha = 0.75f;
 
 		for (int iterationNum = 0; iterationNum < m_config.iterationCount; iterationNum++) {
@@ -216,8 +226,13 @@ public:
 
 						m_lightVertices.push_back(v);
 					}
-					if (!(bsdf->getType() & BSDF::EDelta)) {
+					if (!(bsdf->getType() & BSDF::EDelta) &&
+							(m_config.useVC || m_config.lightTraceOnly)) {
 						connectToEye(pathState, its, bsdf, iterationNum);
+					}
+
+					if (pathState.mPathLength + 2 > m_config.maxDepth) {
+						break;
 					}
 
 					if(!SampleScattering(ray, pathState, bsdf, its)) {
@@ -246,7 +261,10 @@ public:
 			/////////////////////////////////////////////////////////////////////////
 
 			SubPathState pathState;
-			for (int pathIdx = 0; pathIdx < (int)pathCount; ++pathIdx) {
+			for (int pathIdx = 0;
+				(!m_config.lightTraceOnly && pathIdx < (int)pathCount);
+				++pathIdx)
+			{
 				int currentX = pathIdx % res.x;
 				int currentY = pathIdx / res.x;
 				Point2i startPosition = Point2i(currentX, currentY);
@@ -282,8 +300,14 @@ public:
 					if (its.isEmitter()) {
 						Spectrum radiance = its.Le(its.wi);
 
-						if (radiance.isZero())
-							break;
+						if (radiance.isZero()) {
+							// if you don't try this direction then some lights
+							// will be improperly displayed. Don't ask me why.
+							// (try Veach mi.xml scene)
+							radiance = its.Le(-its.wi);
+							if (radiance.isZero())
+								break;
+						}
 
 						if (pathState.mPathLength == 1) {
 							color += pathState.mThroughput * radiance;
@@ -343,15 +367,11 @@ public:
 					}
 				}
 				accumulateColor(currentX, currentY, color, iterationNum);
-				if (pathIdx % 1024 == 0) {
-					film->setBitmap(mBitmap);
-					queue->signalRefresh(job);
-				}
 			}
-			film->setBitmap(mBitmap);
-			queue->signalRefresh(job);
 			Log(EInfo, "Done iteration %d", iterationNum + 1);
-			Log(EInfo, "0 radiance times: %d", zeroRadianceCount);
+			//accumulateMainBitmap(iterationNum, film, queue, job);
+			film->addBitmap(mBitmaps[iterationNum], (Float) 1.0f / m_config.iterationCount);
+			queue->signalRefresh(job);
 		}
 
 		Log(EInfo, "DONE!");
@@ -375,8 +395,7 @@ public:
 		Float directPdfW = pRec.pdf;
 		Float emissionPdfW = directPdfW * dRec.pdf;
 		Float cosLight = dot(dRec.d, pRec.n);
-
-		Assert( cosLight >= 0 );
+		cosLight = std::max(cosLight, Epsilon);
 
 		// this is a hack to get just the light radiance, may not work with any
 		// type of light
@@ -411,7 +430,7 @@ public:
 		int currentX = pixelIndex % res.x;
 		int currentY = pixelIndex / res.x;
 		Point2 startPosition(currentX, currentY);
-		startPosition += mSampler->next2D();
+		startPosition += mSampler->next2D() / 2;
 		sensor->sampleRay(
 				ray,
 				startPosition,
@@ -440,18 +459,37 @@ public:
 			const PerspectiveCamera* sensor,
 			const DirectionSamplingRecord& dRec,
 			const PositionSamplingRecord& pRec) {
-		Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() / 2.0f * M_PI / 360));
+		Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
 		Float cameraPdfW = imagePlaneDist * imagePlaneDist * sensor->pdfDirection(dRec, pRec);
 		return cameraPdfW;
 	}
 
 	void accumulateColor(int x, int y, const Spectrum& color, int iteration) {
-		Spectrum *target = (Spectrum *) mBitmap->getUInt8Data();
-		Float iterationFactor = (iteration == 0 ? 0 : (Float)iteration / (iteration + 1));
-		Float colorIterationFactor = (iteration == 0 ? 1 : (Float)1.0f / (iteration+1));
-		target[y * mBitmap->getWidth() + x] =
-			  target[y * mBitmap->getWidth() + x] * iterationFactor
-			+ color * colorIterationFactor;
+		Spectrum *target = (Spectrum *) mBitmaps[iteration]->getUInt8Data();
+		target[y * mBitmap->getWidth() + x] += color;
+	}
+
+
+	void accumulateMainBitmap(int iteration, Film *film, RenderQueue* queue, const RenderJob *job) {
+		mBitmap->clear();
+		Spectrum *target = (Spectrum*) mBitmap->getUInt8Data();
+		Float iterationFactor = 1.0f / (1.0f+iteration);
+
+
+		Log(EInfo, "Iteration factor: %f", iterationFactor);
+		for (int i = 0; i <= iteration; i++) {
+			Spectrum *currentItBitmap = (Spectrum*)mBitmaps[i]->getUInt8Data();
+			for (int idx = 0; idx < mBitmap->getPixelCount(); idx++) {
+				target[i] += currentItBitmap[i] * iterationFactor;
+				if (idx % 31 == 0) {
+					Log(EInfo, "accumulated color %s to target %s",
+							currentItBitmap[i].toString().c_str(),
+							target[i].toString().c_str());
+				}
+			}
+		}
+		film->setBitmap(mBitmap);
+		queue->signalRefresh(job);
 	}
 
 	Spectrum ConnectVertices(SubPathState &pathState,
@@ -538,7 +576,6 @@ public:
 		return 1.0f / mScene->getEmitters().size();
 	}
 
-	int zeroRadianceCount = 0;
 	Spectrum ConnectToLight(SubPathState &pathState, const Intersection &its, const BSDF *bsdf) {
 		Float lightPickProb = LightPickProbability();
 
@@ -548,15 +585,9 @@ public:
 		DirectSamplingRecord dRec(its);
 
 		radiance = mScene->sampleEmitterDirect(dRec, randomPoint, true);
-
-		if (radiance.isZero()) {
-			//Log(EInfo, "dRec = %s", dRec.toString().c_str());
-			//Log(EInfo, "Zero radiance, data: \n\n%s\n\n%s\n\n", its.toString().c_str(), dRec.toString().c_str());
-		}
 		radiance *= dRec.pdf;
 
 		if (radiance.isZero()) {
-			++zeroRadianceCount;
 			return color;
 		}
 
@@ -603,26 +634,6 @@ public:
 		return color;
 	}
 
-	Spectrum GetLightRadiance(const Emitter *emitter, const Intersection &its, const Vector &d, Float *cosAtLight = NULL) {
-		Spectrum radiance(0.0f);
-		try {
-			Ray r(its.p, -d, 0);
-			Intersection lightIts;
-			mScene->rayIntersect(r, lightIts);
-			if (lightIts.isValid() && !lightIts.isEmitter()) {
-				//Log(EInfo, "Point %s is not an emitter", lightIts.p.toString().c_str());
-			}
-			if (lightIts.isValid() && lightIts.isEmitter()) {
-				radiance = emitter->eval(lightIts, d);
-				if (cosAtLight) {
-					*cosAtLight = dot(lightIts.shFrame.n, d);
-				}
-			}
-		} catch (...) {
-		}
-		return radiance;
-	}
-
 	void connectToEye(SubPathState &pathState, const Intersection& its, const BSDF* bsdf, int iterationNum) {
 		// Sample point on a sensor
 		DirectSamplingRecord dRec(its.p, its.time);
@@ -650,7 +661,7 @@ public:
 		}
 
 		if (dot(its.toLocal(dRec.d), its.wi) < 0) {
-			return;
+			//return;
 		}
 		// Compute BSDF
 		BSDFSamplingRecord bsdfRec(its, its.toLocal(dRec.d));
@@ -669,7 +680,7 @@ public:
 		Float cosToCamera = std::abs(Frame::cosTheta(bsdfRec.wo));
 
 
-		const Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() / 2.0f * M_PI / 360));
+		const Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
 		const Float imagePointToCameraDist = imagePlaneDist / cosAtCamera;
 		const Float imageToSolidAngleFactor = imagePointToCameraDist * imagePointToCameraDist/ cosAtCamera;
 		const Float imageToSurfaceFactor = imageToSolidAngleFactor * std::abs(cosToCamera) / (dRec.dist * dRec.dist);
@@ -679,43 +690,17 @@ public:
 		const Float misWeight = 1.f / (1.f + wLight);
 		const Float surfaceToImageFactor = 1.f / imageToSurfaceFactor;
 		const Spectrum contrib = misWeight * pathState.mThroughput * bsdfFactor / (mLightSubPathCount * surfaceToImageFactor);
-		//Log(EInfo, "thtoughput: %s", pathState.mThroughput.toString().c_str());
-		//Log(EInfo, "misWeight: %f, surfaceToImageFactor: %f, bdsf: %s", misWeight, surfaceToImageFactor, contrib.toString().c_str());
+		//Log(EInfo, "throughput: %s", pathState.mThroughput.toString().c_str());
+		//Log(EInfo, "misWeight: %f, surfaceToImageFactor: %f, contrib: %s", misWeight, surfaceToImageFactor, contrib.toString().c_str());
 
 		if (!contrib.isZero()) {
 			if(occluded(its.p, dRec.d, dRec.dist)) {
 				return;
 			}
 
-			//Log(EInfo, "x: %f, y: %f", imagePos.x, imagePos.y);
 			accumulateColor(imagePos.x, imagePos.y, contrib, iterationNum);
 		}
 	}
-
-	Transform getCaneraToSample(Scene* scene, const PerspectiveCamera* perspectiveCamera){
-		const Vector2i &filmSize   = scene->getSensor()->getFilm()->getSize();
-		const Vector2i &cropSize   = scene->getSensor()->getFilm()->getCropSize();
-		const Point2i  &cropOffset = scene->getSensor()->getFilm()->getCropOffset();
-		const Float aspect = scene->getSensor()->getAspect();
-		ProjectiveCamera *projectiveCamera = dynamic_cast<ProjectiveCamera *>(scene->getSensor());
-		Float nearClip = projectiveCamera->getNearClip();
-		Float farClip = projectiveCamera->getFarClip();
-		Float xFov = perspectiveCamera->getXFov();
-
-		Vector2 relSize((Float) cropSize.x / (Float) filmSize.x,
-				(Float) cropSize.y / (Float) filmSize.y);
-		Point2 relOffset((Float) cropOffset.x / (Float) filmSize.x,
-				(Float) cropOffset.y / (Float) filmSize.y);
-
-		Transform cameraToSample =
-				Transform::scale(Vector(1.0f / relSize.x, 1.0f / relSize.y, 1.0f))
-						* Transform::translate(Vector(-relOffset.x, -relOffset.y, 0.0f))
-						* Transform::scale(Vector(-0.5f, -0.5f*aspect, 1.0f))
-						* Transform::translate(Vector(-1.0f, -1.0f/aspect, 0.0f))
-						* Transform::perspective(xFov, nearClip, farClip);
-
-		return cameraToSample;
- 	}
 
 	MTS_DECLARE_CLASS()
 
@@ -790,7 +775,8 @@ private:
 	PointKDTree <VCMTreeEntry> m_tree;
 	VCMConfiguration m_config;
 	MemoryPool m_pool;
-	ref <Bitmap> mBitmap;
+	ref<Bitmap> mBitmap;
+	std::vector<Bitmap*> mBitmaps;
 	Scene *mScene;
 	Sampler *mSampler;
 

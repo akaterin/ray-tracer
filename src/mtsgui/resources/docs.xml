@@ -231,6 +231,15 @@
 			<param name="iterationCount" readableName="Number of iterations" type="integer" default="10" importance="1">
 				Specifies the number of iterations of the algorithm to perform.
 			</param>
+			<param name="useVC" readableName="Use Vertex Connection" type="boolean" default="true" importance="1">
+				Specifies whether to use vertex connection or not.
+			</param>
+			<param name="useVM" readableName="Use Vertex Merging" type="boolean" default="false" importance="1">
+				Specifies whether to use vertex merging or not.
+			</param>
+			<param name="lightTraceOnly" readableName="Number of iterations" type="boolean" default="false" importance="1">
+				If set to true, only light trace will be performed.
+			</param>
 	</plugin>
 
 	<plugin type="integrator" name="path" readableName="Path tracer"

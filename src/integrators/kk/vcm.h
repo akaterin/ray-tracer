@@ -22,6 +22,9 @@ struct VCMConfiguration {
 	int maxDepth;
 	int rrDepth;
 	int iterationCount;
+	bool useVC;
+	bool useVM;
+	bool lightTraceOnly;
 
 
 	inline VCMConfiguration() { }
@@ -30,12 +33,18 @@ struct VCMConfiguration {
 		maxDepth = stream->readInt();
 		rrDepth = stream->readInt();
 		iterationCount = stream->readInt();
+		useVC = stream->readBool();
+		useVM = stream->readBool();
+		lightTraceOnly = stream->readBool();
 	}
 
 	inline void serialize(Stream *stream) const {
 		stream->writeInt(maxDepth);
 		stream->writeInt(rrDepth);
 		stream->writeInt(iterationCount);
+		stream->writeBool(useVC);
+		stream->writeBool(useVM);
+		stream->writeBool(lightTraceOnly);
 	}
 
 	void dump() const {
