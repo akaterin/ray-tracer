@@ -228,6 +228,9 @@
 				Specifies the minimum path depth, after which the implementation will start to use the
 				"russian roulette" path termination criterion (set to <tt>-1</tt> to disable).
 			</param>
+			<param name="iterationCount" readableName="Number of iterations" type="integer" default="10" importance="1">
+				Specifies the number of iterations of the algorithm to perform.
+			</param>
 	</plugin>
 
 	<plugin type="integrator" name="path" readableName="Path tracer"

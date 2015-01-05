@@ -21,6 +21,7 @@ MTS_NAMESPACE_BEGIN
 struct VCMConfiguration {
 	int maxDepth;
 	int rrDepth;
+	int iterationCount;
 
 
 	inline VCMConfiguration() { }
@@ -28,17 +29,20 @@ struct VCMConfiguration {
 	inline VCMConfiguration(Stream *stream){
 		maxDepth = stream->readInt();
 		rrDepth = stream->readInt();
+		iterationCount = stream->readInt();
 	}
 
 	inline void serialize(Stream *stream) const {
 		stream->writeInt(maxDepth);
 		stream->writeInt(rrDepth);
+		stream->writeInt(iterationCount);
 	}
 
 	void dump() const {
 		SLog(EInfo, "Vertex connection and merging configuration:");
 		SLog(EInfo, "   Maximum path depth          : %i", maxDepth);
 		SLog(EInfo, "   Russian roulette depth      : %i", rrDepth);
+		SLog(EInfo, "   Iteration count             : %i", iterationCount);
 	}
 };
 

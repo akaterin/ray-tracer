@@ -84,6 +84,7 @@ public:
 		/* Load the parameters / defaults */
 		m_config.maxDepth = props.getInteger("maxDepth", 10);
 		m_config.rrDepth = props.getInteger("rrDepth", 5);
+		m_config.iterationCount = props.getInteger("iterationCount", 5);
 
 		m_config.dump();
 
@@ -145,7 +146,7 @@ public:
 
 		const Float radiusAlpha = 0.75f;
 
-		for (int iterationNum = 0; iterationNum < 40; iterationNum++) {
+		for (int iterationNum = 0; iterationNum < m_config.iterationCount; iterationNum++) {
 
 			Float radius = scene->getBSphere().radius * 0.003f;
 			radius /= std::pow(Float(iterationNum + 1), 0.5f * (1 - radiusAlpha));
@@ -310,7 +311,7 @@ public:
 						break;
 					}
 
-					if (m_config.maxDepth != -1 && pathState.mPathLength >= m_config.maxDepth) {
+					if (m_config.maxDepth != -1 && pathState.mPathLength + 1 > m_config.maxDepth) {
 						break;
 					}
 
@@ -329,7 +330,7 @@ public:
 							const VCMVertex &lightVertex = m_lightVertices[i];
 
 							if (m_config.maxDepth != -1 &&
-								lightVertex.mPathLength + pathState.mPathLength > m_config.maxDepth)
+								lightVertex.mPathLength + pathState.mPathLength + 1 > m_config.maxDepth)
 								break;
 
 							color += pathState.mThroughput * lightVertex.mThroughput *
