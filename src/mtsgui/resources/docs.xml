@@ -214,7 +214,7 @@
 		</param>
 	</plugin>
 	
-	<plugin type="integrator" name="vcmIntegrator" readableName="Vertex Connection And Merging Integrator"
+	<plugin type="integrator" name="vcmintegrator" readableName="Vertex Connection And Merging Integrator"
 			show="true" className="VCMIntegrator" extends="Integrator">
 			<descr>
 				<p>Mine!!!</p>
