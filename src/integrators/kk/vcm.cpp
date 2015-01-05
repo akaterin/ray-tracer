@@ -217,7 +217,7 @@ public:
 						m_lightVertices.push_back(v);
 					}
 					if (!(bsdf->getType() & BSDF::EDelta)) {
-						//connectToEye(scene, time, emitterPath, pathState, vertexIdx, iterationNum);
+						connectToEye(pathState, its, bsdf, iterationNum);
 					}
 
 					if(!SampleScattering(ray, pathState, bsdf, its)) {
@@ -338,14 +338,18 @@ public:
 						}
 					}
 
-					film->setBitmap(mBitmap);
-					queue->signalRefresh(job);
 					if(!SampleScattering(ray, pathState, bsdf, its)) {
 						break;
 					}
 				}
 				accumulateColor(currentX, currentY, color, iterationNum);
+				if (pathIdx % 1024 == 0) {
+					film->setBitmap(mBitmap);
+					queue->signalRefresh(job);
+				}
 			}
+			film->setBitmap(mBitmap);
+			queue->signalRefresh(job);
 			Log(EInfo, "Done iteration %d", iterationNum + 1);
 			Log(EInfo, "0 radiance times: %d", zeroRadianceCount);
 		}
@@ -619,67 +623,56 @@ public:
 		return radiance;
 	}
 
-	bool connectToEye(Scene *scene, Float time, Path *emitterPath, SubPathState &pathState, int vertexIdx, int iterationNum) {
-	/*	int prevSize = emitterPath->vertexCount();
-		Path *sensorPath = new Path();
-		Path *emitterPathCopy = new Path();
-		emitterPath->clone(*emitterPathCopy, m_pool);
-		sensorPath->initialize(scene, time, ERadiance, m_pool);
-		sensorPath->randomWalk(scene, scene->getSampler(), 1, 0, ERadiance, m_pool);
+	void connectToEye(SubPathState &pathState, const Intersection& its, const BSDF* bsdf, int iterationNum) {
+		// Sample point on a sensor
+		DirectSamplingRecord dRec(its.p, its.time);
 
-		PathVertex *vertexOnEye = sensorPath->vertex(1);
-		PathVertex *succOnSensor = sensorPath->vertex(0);
-		PathEdge *succEdge = sensorPath->edge(0);
-		PathEdge *lastEdge = emitterPathCopy->edge(vertexIdx - 1);
-		PathVertex *predLastVertex = emitterPathCopy->vertexOrNull(vertexIdx - 1);
-		PathVertex *lastVertex = emitterPathCopy->vertex(vertexIdx);
-		PathEdge *newEgde = new PathEdge();
-
-		bool succeded = PathVertex::connect(scene, predLastVertex, lastEdge, lastVertex, newEgde, vertexOnEye, succEdge, succOnSensor);
-		if (!succeded) {
-			emitterPathCopy->release(m_pool);
-			delete sensorPath;
-			delete emitterPathCopy;
-			return false;
-		}
-
-		emitterPathCopy->append(newEgde, vertexOnEye);
-		emitterPathCopy->append(succEdge, succOnSensor);
-
-		const Intersection &its = lastVertex->getIntersection();
-		const BSDF *bsdf = its.getBSDF();
-		const DirectionSamplingRecord dRec(its);
-		// PAN CHYBA NIEPOWAZNY, ZROBIE OT JUTRO!!!!1
-		Vector wo = vertexOnEye->getPosition() - dRec.p;
-		Float dist = wo.length();
-		wo /= dist;
-		BSDFSamplingRecord bsdfRec(its, its.toLocal(wo));
-		const Spectrum bsdfFactor = bsdf->eval(bsdfRec);
-		if (bsdfFactor.isZero()) {
-			return false;
-		}
-
-		Float cosToCamera = Frame::cosTheta(bsdfRec.wo);
-
-		Float continuationProbability = 1; //std::min(pathState.mThroughput.max(), (Float) 0.95f);
-		bsdfRec.reverse();
-		Float bsdfRevPdfW = bsdf->pdf(bsdfRec) * continuationProbability;
-		// incorrect
-		const Float cosAtCamera = std::abs(dot(wo, its.geoFrame.n));
-		PerspectiveCamera *perspectiveCamera = dynamic_cast<PerspectiveCamera *>(scene->getSensor());
-		if (perspectiveCamera == 0) {
+		PerspectiveCamera *sensor = dynamic_cast<PerspectiveCamera *>(mScene->getSensor());
+		if (sensor == 0) {
 			Log(EError, "Only perspective camera supported");
 		}
 
-		Point imagePos;
-		if(perspectiveCamera->getSamplePosition(pRec, dRec, imagePos)) {
-			return false;
+		sensor->sampleDirect(dRec, mSampler->next2D());
+
+		// dRec.d is direction to camera
+		const Float cosAtCamera = dot(dRec.n, -dRec.d);
+
+		if (cosAtCamera <= 0.0f) {
+			return;
 		}
 
-		const Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
+		// Compute pixel position of current point
+		DirectionSamplingRecord dirRec(-dRec.d);
+		Point2 imagePos;
+
+		if (!(sensor->getSamplePosition(dRec, dirRec, imagePos))) {
+			return;
+		}
+
+		if (dot(its.toLocal(dRec.d), its.wi) < 0) {
+			return;
+		}
+		// Compute BSDF
+		BSDFSamplingRecord bsdfRec(its, its.toLocal(dRec.d));
+
+		const Spectrum bsdfFactor = bsdf->eval(bsdfRec);
+
+		if (bsdfFactor.isZero()) {
+			return;
+		}
+
+		Float continuationProbability = 1; //std::min(pathState.mThroughput.max(), (Float) 0.95f);
+
+		bsdfRec.reverse();
+		Float bsdfRevPdfW = bsdf->pdf(bsdfRec) * continuationProbability;
+
+		Float cosToCamera = std::abs(Frame::cosTheta(bsdfRec.wo));
+
+
+		const Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() / 2.0f * M_PI / 360));
 		const Float imagePointToCameraDist = imagePlaneDist / cosAtCamera;
-		const Float imageToSolidAngleFactor = sqrt(imagePointToCameraDist) / cosAtCamera;
-		const Float imageToSurfaceFactor = imageToSolidAngleFactor * std::abs(cosToCamera) / sqrt(dist);
+		const Float imageToSolidAngleFactor = imagePointToCameraDist * imagePointToCameraDist/ cosAtCamera;
+		const Float imageToSurfaceFactor = imageToSolidAngleFactor * std::abs(cosToCamera) / (dRec.dist * dRec.dist);
 
 		const Float cameraPdfA = imageToSurfaceFactor;
 		const Float wLight = (cameraPdfA / mLightSubPathCount) * (mMisVMWeightFactor + pathState.dVCM + pathState.dVC * bsdfRevPdfW);
@@ -690,16 +683,13 @@ public:
 		//Log(EInfo, "misWeight: %f, surfaceToImageFactor: %f, bdsf: %s", misWeight, surfaceToImageFactor, contrib.toString().c_str());
 
 		if (!contrib.isZero()) {
-			//TODO is occuled
+			if(occluded(its.p, dRec.d, dRec.dist)) {
+				return;
+			}
 
 			//Log(EInfo, "x: %f, y: %f", imagePos.x, imagePos.y);
 			accumulateColor(imagePos.x, imagePos.y, contrib, iterationNum);
 		}
-
-		emitterPathCopy->release(m_pool);
-		delete sensorPath;
-		delete emitterPathCopy;
-		return succeded;
 	}
 
 	Transform getCaneraToSample(Scene* scene, const PerspectiveCamera* perspectiveCamera){
@@ -724,7 +714,7 @@ public:
 						* Transform::translate(Vector(-1.0f, -1.0f/aspect, 0.0f))
 						* Transform::perspective(xFov, nearClip, farClip);
 
-		return cameraToSample;*/
+		return cameraToSample;
  	}
 
 	MTS_DECLARE_CLASS()
