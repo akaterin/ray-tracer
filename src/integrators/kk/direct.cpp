@@ -162,14 +162,17 @@ public:
 	Spectrum computeMIS(std::vector<SamplingValue> brdfSamples, std::vector<SamplingValue> lightSamples, Spectrum Li) const{
 		Float cBrdf = brdfSamplesNo/(Float)(brdfSamplesNo + lightSamplesNo);
 		Float cLight = lightSamplesNo/(Float)(brdfSamplesNo + lightSamplesNo);
+		Float bsdfFrag = 1/(Float)brdfSamplesNo;
+		Float lightFrag = 1/(Float)lightSamplesNo;
 		for( int i = 0; i < brdfSamples.size(); ++i ){
 			Float weight = cBrdf*brdfSamples[i].pdf/( cBrdf*brdfSamples[i].pdf + cLight*brdfSamples[i].otherPdf );
-			Li += weight*brdfSamples[i].value * brdfSamples[i].bsdfValue;
+			Li += weight*brdfSamples[i].value * brdfSamples[i].bsdfValue*bsdfFrag;
 		}
 
 		for( int i = 0; i < lightSamples.size(); ++i ){
 			Float weight = cLight*lightSamples[i].pdf/( cBrdf*lightSamples[i].otherPdf + cLight*lightSamples[i].pdf );
-			Li += weight*lightSamples[i].value * lightSamples[i].bsdfValue;
+			Li += weight*lightSamples[i].value * lightSamples[i].bsdfValue*lightFrag;
+			//Log(EInfo, "wifght: %f, pdf: %f, otherPdf: %f", weight, lightSamples[i].pdf, cBrdf*lightSamples[i].otherPdf );
 		}
 		return Li;
 	}
