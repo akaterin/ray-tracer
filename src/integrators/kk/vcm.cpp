@@ -243,7 +243,7 @@ public:
 
 			for (int i = 0; i < (int)pathCount; ++i) {
 				mSampler->generate(Point2i(i));
-				for (int advanceTimes = 0; advanceTimes < 20*iterationNum; advanceTimes++) {
+				for (int advanceTimes = 0; advanceTimes < iterationNum; advanceTimes++) {
 					mSampler->advance();
 				}
 
@@ -318,17 +318,17 @@ public:
 			// GENERATE CAMERA PATHS
 			/////////////////////////////////////////////////////////////////////////
 
-			SubPathState pathState;
 			for (int pathIdx = 0;
 				(!m_config.lightTraceOnly && pathIdx < (int)pathCount);
 				++pathIdx)
 			{
+				SubPathState pathState;
 				int currentX = pathIdx % res.x;
 				int currentY = pathIdx / res.x;
 				Point2i startPosition = Point2i(currentX, currentY);
 				mSampler->generate(startPosition);
 
-				for (int advanceTimes = 0; advanceTimes < 20*iterationNum; advanceTimes++) {
+				for (int advanceTimes = 0; advanceTimes < iterationNum; advanceTimes++) {
 					mSampler->advance();
 				}
 				Ray ray = generateCameraSample(pathState, pathIdx, pathCount);
