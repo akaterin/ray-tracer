@@ -13,80 +13,142 @@
 
 MTS_NAMESPACE_BEGIN
 
-typedef PathVertex* PathVertexPtr;
-//    typedef VCMKDTree::IndexType    IndexType;
-//    typedef VCMKDTree::SearchResult SearchResult;
+class VCMIntegrator : public Integrator {
+	struct VCMVertex {
+		VCMVertex() {
+		}
 
-enum EVCMVertexData {
-	EdVCMData = 0,
-	EdVCData = 1,
-	EdVMData = 2
-};
-
-struct VCMVertex {
-	VCMVertex() {
-	}
-
-	VCMVertex(const Point &p, const Intersection &intersection,
-			const Spectrum &throughput, uint32_t pathLength,
-			float dvcm, float dvc, float dvm,
-			const BSDF *bsdf) :
+		VCMVertex(const Point &p, const Intersection &intersection,
+				const Spectrum &throughput, uint32_t pathLength,
+				float dvcm, float dvc, float dvm,
+				const BSDF *bsdf) :
 			mPosition(p), mIntersect(intersection), mThroughput(throughput),
 			mPathLength(pathLength), dVCM(dvcm),
 			dVC(dvc), dVM(dvm), mBsdf(bsdf) {
-	}
+			}
 
-	Point mPosition;
-	Intersection mIntersect;
-	Spectrum mThroughput; // Path throughput (including emission)
-	uint32_t mPathLength; // Number of segments between source and vertex
+		Point mPosition;
+		Intersection mIntersect;
+		Spectrum mThroughput; // Path throughput (including emission)
+		uint32_t mPathLength; // Number of segments between source and vertex
 
-	// Stores all required local information, including incoming direction.
-	// TODO: will it boom as it's a pointer?
-	Float dVCM; // MIS quantity used for vertex connection and merging
-	Float dVC;  // MIS quantity used for vertex connection
-	Float dVM;  // MIS quantity used for vertex merging
-	const BSDF *mBsdf;
-};
+		Float dVCM; // MIS quantity used for vertex connection and merging
+		Float dVC;  // MIS quantity used for vertex connection
+		Float dVM;  // MIS quantity used for vertex merging
+		const BSDF *mBsdf;
+	};
 
-// to make easier to carry those values around
-struct SubPathState {
-	Spectrum mThroughput;         // Path throughput
-	bool mIsFiniteLight;
-	bool mSpecularPath;
-	uint32_t mPathLength;
-
-	Float dVCM; // MIS quantity used for vertex connection and merging
-	Float dVC;  // MIS quantity used for vertex connection
-	Float dVM;  // MIS quantity used for vertex merging
-};
-
-struct VCMTreeEntry :
+	struct VCMTreeEntry :
 		public SimpleKDNode<Point, VCMVertex> {
+	public:
+		/// Dummy constructor
+		inline VCMTreeEntry() {
+		}
+
+		inline VCMTreeEntry(const VCMVertex &v) {
+			position = v.mPosition;
+			data = v;
+		}
+
+		/// Return a string representation (for debugging)
+		std::string toString() const {
+			return "vcmTreeEntry";
+		}
+	};
+
+	typedef PointKDTree <VCMTreeEntry> VCMTree;
+	// to make easier to carry those values around
+	struct SubPathState {
+		Spectrum mThroughput;         // Path throughput
+		bool mIsFiniteLight;
+		bool mSpecularPath;
+		uint32_t mPathLength;
+
+		Float dVCM; // MIS quantity used for vertex connection and merging
+		Float dVC;  // MIS quantity used for vertex connection
+		Float dVM;  // MIS quantity used for vertex merging
+	};
+
+	class RangeQuery {
+		public:
+			RangeQuery(
+					const VCMIntegrator *vertexCM,
+					const Intersection &its,
+					const BSDF* bsdf,
+					const SubPathState& pathState) :
+				m_vertexCM(vertexCM), m_its(its), m_bsdf(bsdf),
+				m_pathState(pathState), m_contrib(0.0f)
+		{}
+
+			const Spectrum getContrib() {
+				return m_contrib;
+			}
+
+			void operator() (const VCMTreeEntry& lightVertexNode) {
+				const VCMVertex& lightVertex = lightVertexNode.data;
+				if((lightVertex.mPathLength + m_pathState.mPathLength >
+							m_vertexCM->m_config.maxDepth) ||
+						(lightVertex.mPathLength + m_pathState.mPathLength <
+						 m_vertexCM->m_config.minDepth)) {
+					return;
+				}
+
+				const Intersection &lightIts = lightVertex.mIntersect;
+				Vector dirToLight = lightIts.toWorld(lightIts.wi);
+				Float cosCamera, cameraBsdfDirPdfW, cameraBsdfRevPdfW;
+
+				BSDFSamplingRecord bsdfRec(m_its, m_its.toLocal(dirToLight));
+				cosCamera = std::abs(Frame::cosTheta(bsdfRec.wo));
+
+				Spectrum bsdfFactor = m_bsdf->eval(bsdfRec);
+
+				if (bsdfFactor.isZero()) {
+					return;
+				}
+
+				cameraBsdfDirPdfW = m_bsdf->pdf(bsdfRec);
+				bsdfRec.reverse();
+				cameraBsdfRevPdfW = m_bsdf->pdf(bsdfRec);
+
+				// TODO: Russian roulette factor
+				Float lightContinuationProb = 1.0f;
+				Float cameraContinuationProb = 1.0f;
+
+				cameraBsdfDirPdfW *= cameraContinuationProb;
+				cameraBsdfRevPdfW *= lightContinuationProb;
+
+				Float wLight = lightVertex.dVCM * m_vertexCM->mMisVCWeightFactor +
+					lightVertex.dVM * cameraBsdfDirPdfW;
+
+				Float wCamera = m_pathState.dVCM * m_vertexCM->mMisVCWeightFactor +
+					m_pathState.dVM * cameraBsdfRevPdfW;
+
+				Assert( wLight + 1.0f + wCamera > 0 );
+				Float misWeight = Float(1.0f) / (wLight + 1.0f + wCamera);
+
+				m_contrib += misWeight * bsdfFactor * lightVertex.mThroughput;
+			}
+
+
+		private:
+			const VCMIntegrator*	m_vertexCM;
+			const Intersection&		m_its;
+			const BSDF*				m_bsdf;
+			const SubPathState&		m_pathState;
+			Spectrum				m_contrib;
+	};
+
 public:
-	/// Dummy constructor
-	inline VCMTreeEntry() {
-	}
-
-	inline VCMTreeEntry(const VCMVertex &v) {
-		position = v.mPosition;
-		data = v;
-	}
-
-	/// Return a string representation (for debugging)
-	std::string toString() const {
-	}
-};
-
-class VCMIntegrator : public Integrator {
-public:
-	VCMIntegrator(const Properties &props) : Integrator(props) {
+	VCMIntegrator(const Properties &props) : Integrator(props),
+		m_tree(0, VCMTree::ESlidingMidpoint)
+	{
 		/* Load the parameters / defaults */
 		m_config.maxDepth = props.getInteger("maxDepth", 10);
+		m_config.minDepth = props.getInteger("minDepth", 0);
 		m_config.rrDepth = props.getInteger("rrDepth", 5);
 		m_config.iterationCount = props.getInteger("iterationCount", 5);
 		m_config.useVC = props.getBoolean("useVC", true);
-		m_config.useVM = props.getBoolean("useVM", false);
+		m_config.useVM = props.getBoolean("useVM", true);
 		m_config.lightTraceOnly = props.getBoolean("lightTraceOnly", false);
 
 
@@ -132,14 +194,12 @@ public:
 	bool render(Scene *scene, RenderQueue *queue, const RenderJob *job,
 			int sceneResID, int sensorResID, int samplerResID) {
 
-		Log(EInfo, "Start");
-
 		mScene = scene;
 		mSampler = scene->getSampler();
-		// do we need this?
-		//scene->initializeBidirectional();
+
 		ref <Sensor> sensor = scene->getSensor();
 		Film *film = sensor->getFilm();
+
 		const Vector2i res = film->getSize();
 		Float pathCount = res.x * res.y;
 		mLightSubPathCount = float(res.x * res.y);
@@ -154,21 +214,21 @@ public:
 		mBitmap->clear();
 
 		film->setBitmap(mBitmap);
+
+		// TODO: move it to config
 		const Float radiusAlpha = 0.75f;
 
 		for (int iterationNum = 0; iterationNum < m_config.iterationCount; iterationNum++) {
-
+			// TODO: move base radius to config
 			Float radius = scene->getBSphere().radius * 0.003f;
 			radius /= std::pow(Float(iterationNum + 1), 0.5f * (1 - radiusAlpha));
 			const Float radiusSqr = radius * radius;
 
-			Log(EInfo, "Scene BSphere radius: %f", scene->getBSphere().radius);
-			Log(EInfo, "VCM Radius %f", radius);
+			mVmNormalization = 1.f / (radiusSqr * M_PI * mLightSubPathCount);
 
 			mEtaVCM = (M_PI * radiusSqr) * pathCount;
-			mMisVMWeightFactor = 0.0f; //mEtaVCM;
-			mMisVCWeightFactor = 1.f / mEtaVCM;
-
+			mMisVMWeightFactor = m_config.useVM ? mEtaVCM : 0.0f;
+			mMisVCWeightFactor = m_config.useVC ? 1.f / mEtaVCM : 0.0f;
 
 			Log(EInfo, "pathCount: %f", pathCount);
 			Log(EInfo, "etaVCM: %f\nVM Weight: %f\nVC Weight: %f\n", mEtaVCM, mMisVMWeightFactor, mMisVCWeightFactor);
@@ -246,16 +306,14 @@ public:
 			/////////////////////////////////////////////////////////////////////////
 			// BUILD SEARCH STRUCT
 			/////////////////////////////////////////////////////////////////////////
-/*
+
 			m_tree.reserve(pathCount);
 			m_tree.clear();
 			for (int i = 0; i < m_lightVertices.size(); i++) {
 				m_tree.push_back(m_lightVertices[i]);
 			}
+			m_tree.build();
 
-			Log(EInfo, "Built the tree, it has %d vertices", m_tree.size());
-
-*/
 			/////////////////////////////////////////////////////////////////////////
 			// GENERATE CAMERA PATHS
 			/////////////////////////////////////////////////////////////////////////
@@ -301,6 +359,7 @@ public:
 						Spectrum radiance = its.Le(its.wi);
 
 						if (radiance.isZero()) {
+							// TODO: find an explanation
 							// if you don't try this direction then some lights
 							// will be improperly displayed. Don't ask me why.
 							// (try Veach mi.xml scene)
@@ -362,6 +421,13 @@ public:
 						}
 					}
 
+					if (!(bsdf->getType() & BSDF::EDelta) && m_config.useVM) {
+						RangeQuery query(this, its, bsdf, pathState);
+						m_tree.executeQuery(its.p, radius, query);
+						color += pathState.mThroughput *
+							mVmNormalization * query.getContrib();
+					}
+
 					if(!SampleScattering(ray, pathState, bsdf, its)) {
 						break;
 					}
@@ -369,7 +435,7 @@ public:
 				accumulateColor(currentX, currentY, color, iterationNum);
 			}
 			Log(EInfo, "Done iteration %d", iterationNum + 1);
-			//accumulateMainBitmap(iterationNum, film, queue, job);
+
 			film->addBitmap(mBitmaps[iterationNum], (Float) 1.0f / m_config.iterationCount);
 			queue->signalRefresh(job);
 		}
@@ -450,8 +516,6 @@ public:
 		pathState.dVCM = pathCount / cameraPdfW;
 		pathState.dVC = pathState.dVM = 0;
 
-		//Log(EInfo, "CameraPdfW = %f, pathCount = %f, dVCM = %f", cameraPdfW, pathCount, pathState.dVCM);
-
 		return ray;
 	}
 
@@ -467,29 +531,6 @@ public:
 	void accumulateColor(int x, int y, const Spectrum& color, int iteration) {
 		Spectrum *target = (Spectrum *) mBitmaps[iteration]->getUInt8Data();
 		target[y * mBitmap->getWidth() + x] += color;
-	}
-
-
-	void accumulateMainBitmap(int iteration, Film *film, RenderQueue* queue, const RenderJob *job) {
-		mBitmap->clear();
-		Spectrum *target = (Spectrum*) mBitmap->getUInt8Data();
-		Float iterationFactor = 1.0f / (1.0f+iteration);
-
-
-		Log(EInfo, "Iteration factor: %f", iterationFactor);
-		for (int i = 0; i <= iteration; i++) {
-			Spectrum *currentItBitmap = (Spectrum*)mBitmaps[i]->getUInt8Data();
-			for (int idx = 0; idx < mBitmap->getPixelCount(); idx++) {
-				target[i] += currentItBitmap[i] * iterationFactor;
-				if (idx % 31 == 0) {
-					Log(EInfo, "accumulated color %s to target %s",
-							currentItBitmap[i].toString().c_str(),
-							target[i].toString().c_str());
-				}
-			}
-		}
-		film->setBitmap(mBitmap);
-		queue->signalRefresh(job);
 	}
 
 	Spectrum ConnectVertices(SubPathState &pathState,
@@ -765,25 +806,27 @@ private:
 		}
 
 		pathState.mThroughput *= bsdfFactor / bsdfDirPdfW;
-		//Log(EInfo, "After scattering dVCM: %f, dVC: %f\n", pathState.dVCM, pathState.dVC);
 		return true;
 	}
 
+public:
+	Float mEtaVCM;
+	Float mMisVMWeightFactor;
+	Float mMisVCWeightFactor;
+	Float mLightSubPathCount;
+	Float mVmNormalization;
+	VCMConfiguration m_config;
+private:
 	ref <ParallelProcess> m_process;
 	std::vector <VCMVertex> m_lightVertices;
 	std::vector<int> m_pathEnds;
-	PointKDTree <VCMTreeEntry> m_tree;
-	VCMConfiguration m_config;
+	VCMTree m_tree;
 	MemoryPool m_pool;
 	ref<Bitmap> mBitmap;
 	std::vector<Bitmap*> mBitmaps;
 	Scene *mScene;
 	Sampler *mSampler;
 
-	Float mEtaVCM;
-	Float mMisVMWeightFactor;
-	Float mMisVCWeightFactor;
-	Float mLightSubPathCount;
 };
 
 MTS_IMPLEMENT_CLASS_S(VCMIntegrator,false, Integrator)

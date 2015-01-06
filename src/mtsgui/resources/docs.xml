@@ -234,7 +234,7 @@
 			<param name="useVC" readableName="Use Vertex Connection" type="boolean" default="true" importance="1">
 				Specifies whether to use vertex connection or not.
 			</param>
-			<param name="useVM" readableName="Use Vertex Merging" type="boolean" default="false" importance="1">
+			<param name="useVM" readableName="Use Vertex Merging" type="boolean" default="true" importance="1">
 				Specifies whether to use vertex merging or not.
 			</param>
 			<param name="lightTraceOnly" readableName="Number of iterations" type="boolean" default="false" importance="1">
