@@ -140,7 +140,7 @@ class VCMIntegrator : public Integrator {
 
 public:
 	VCMIntegrator(const Properties &props) : Integrator(props),
-		m_tree(0, VCMTree::ESlidingMidpoint)
+		m_tree(0, VCMTree::EBalanced)
 	{
 		/* Load the parameters / defaults */
 		m_config.maxDepth = props.getInteger("maxDepth", 10);
@@ -230,8 +230,6 @@ public:
 			mMisVMWeightFactor = m_config.useVM ? mEtaVCM : 0.0f;
 			mMisVCWeightFactor = m_config.useVC ? 1.f / mEtaVCM : 0.0f;
 
-			Log(EInfo, "pathCount: %f", pathCount);
-			Log(EInfo, "etaVCM: %f\nVM Weight: %f\nVC Weight: %f\n", mEtaVCM, mMisVMWeightFactor, mMisVCWeightFactor);
 			//////////////////////////////////////////////////////////////////////////
 			// Generate light paths
 			//////////////////////////////////////////////////////////////////////////
@@ -242,12 +240,9 @@ public:
 			m_pathEnds.clear();
 
 			for (int i = 0; i < (int)pathCount; ++i) {
-				mSampler->generate(Point2i(i));
-				for (int advanceTimes = 0; advanceTimes < iterationNum; advanceTimes++) {
-					mSampler->advance();
-				}
-
 				SubPathState pathState;
+
+				mSampler->generate(Point2i(i * iterationNum + 1));
 
 				Ray ray = generateLightSample(pathState);
 
@@ -307,12 +302,14 @@ public:
 			// BUILD SEARCH STRUCT
 			/////////////////////////////////////////////////////////////////////////
 
-			m_tree.reserve(pathCount);
-			m_tree.clear();
-			for (int i = 0; i < m_lightVertices.size(); i++) {
-				m_tree.push_back(m_lightVertices[i]);
+			if (m_config.useVM) {
+				m_tree.reserve(pathCount);
+				m_tree.clear();
+				for (int i = 0; i < m_lightVertices.size(); i++) {
+					m_tree.push_back(m_lightVertices[i]);
+				}
+				m_tree.build();
 			}
-			m_tree.build();
 
 			/////////////////////////////////////////////////////////////////////////
 			// GENERATE CAMERA PATHS
@@ -325,12 +322,11 @@ public:
 				SubPathState pathState;
 				int currentX = pathIdx % res.x;
 				int currentY = pathIdx / res.x;
-				Point2i startPosition = Point2i(currentX, currentY);
-				mSampler->generate(startPosition);
 
-				for (int advanceTimes = 0; advanceTimes < iterationNum; advanceTimes++) {
-					mSampler->advance();
-				}
+				Point2i startPosition = Point2i(currentX, currentY);
+
+				mSampler->generate(startPosition * iterationNum);
+
 				Ray ray = generateCameraSample(pathState, pathIdx, pathCount);
 
 				Spectrum color(0.0f);
@@ -349,6 +345,7 @@ public:
 					const BSDF *bsdf = its.getBSDF();
 
 					Float cosTheta = std::abs(Frame::cosTheta(its.wi));
+
 					pathState.dVCM *= its.t * its.t;
 					pathState.dVCM /= cosTheta;
 					pathState.dVC /= cosTheta;
@@ -450,7 +447,6 @@ public:
 		Float lightPickProb = (Float) 1.0f / emitters.size();
 		ref<Emitter> emitter = emitters[lightId];
 
-
 		PositionSamplingRecord pRec;
 		DirectionSamplingRecord dRec;
 		emitter->samplePosition(pRec, mSampler->next2D());
@@ -493,10 +489,18 @@ public:
 		const PerspectiveCamera* sensor =
 			static_cast<const PerspectiveCamera*>(mScene->getSensor());
 		const Vector2i res = sensor->getFilm()->getSize();
-		int currentX = pixelIndex % res.x;
-		int currentY = pixelIndex / res.x;
+		int currentX = pixelIndex % res.x + mSampler->next1D();
+		int currentY = pixelIndex / res.x + mSampler->next1D();
+
+		// when computing cameraPdfW mitsuba uses a bounding box to check if
+		// the point lies inside an AABB. Sometimes the point may lie on the
+		// boundary, but the check uses strong equalities
+		currentX = currentX == 0 ? 1 : currentX;
+		currentY = currentY == 0 ? 1 : currentY;
+		currentX = currentX >= res.x ? res.x - 1 : currentX;
+		currentY = currentY >= res.y ? res.y - 1 : currentY;
 		Point2 startPosition(currentX, currentY);
-		startPosition += mSampler->next2D() / 2;
+
 		sensor->sampleRay(
 				ray,
 				startPosition,
@@ -506,6 +510,7 @@ public:
 
 		PositionSamplingRecord pRec;
 		sensor->samplePosition(pRec, mSampler->next2D());
+
 		DirectionSamplingRecord dRec(ray.d, ESolidAngle);
 
 		Float cameraPdfW = computeCameraPdfW(sensor, dRec, pRec);
@@ -523,7 +528,7 @@ public:
 			const PerspectiveCamera* sensor,
 			const DirectionSamplingRecord& dRec,
 			const PositionSamplingRecord& pRec) {
-		Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
+		Float imagePlaneDist = Float(sensor->getFilm()->getSize().x) / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
 		Float cameraPdfW = imagePlaneDist * imagePlaneDist * sensor->pdfDirection(dRec, pRec);
 		return cameraPdfW;
 	}
@@ -544,11 +549,6 @@ public:
 		BSDFSamplingRecord bsdfRec(its, its.toLocal(direction));
 		Spectrum cameraBsdfFactor = bsdf->eval(bsdfRec);
 		cosCamera = std::abs(Frame::cosTheta(bsdfRec.wo));
-
-		if (cameraBsdfFactor.isZero()) {
-			//Log(EInfo, "camera BSDF Factor is zero");
-			return Spectrum(0.0f);
-		}
 
 		cameraBsdfDirPdfW = bsdf->pdf(bsdfRec);
 		bsdfRec.reverse();
@@ -576,7 +576,6 @@ public:
 
 		// Not sure how that's possible.
 		if (cosCamera * cosLight < 0) {
-			//Log(EInfo, "cosCamera: %f, cosLight: %f", cosCamera, cosLight);
 			return Spectrum(0.0f);
 		}
 
@@ -594,10 +593,8 @@ public:
 		Spectrum contrib = (geometryTerm * misWeight) * cameraBsdfFactor * lightBsdfFactor;
 
 		if (contrib.isZero() || occluded(its.p, direction, dist)) {
-			//Log(EInfo, "contrib: %s, if non-zero, occluded!", contrib.toString().c_str());
 			return Spectrum(0.0f);
 		}
-		//Log(EInfo, "Non zero contrib from vertex connection: %s, misWeight: %f", contrib.toString().c_str(), misWeight);
 
 		return contrib;
 	}
@@ -664,11 +661,7 @@ public:
 		Float wLight = bsdfDirPdfW / (lightPickProb * directPdfW);
 		Float wCamera = (emissionPdfW * cosToLight / (directPdfW * cosAtLight)
 				* (mMisVMWeightFactor + pathState.dVCM + pathState.dVC * bsdfRevPdfW));
-		//Log(EInfo, "\n  emissionPdfW: %f\n  cosToLight: %f\n  directPdfW: %f\n  cosAtLight: %f\n  mMisVMWeightFactor: %f\n  dVCM: %f\n  dVC: %f\n  bsdfRevPdfW: %f\n", emissionPdfW, cosToLight, directPdfW, cosAtLight, mMisVMWeightFactor, pathState.dVCM, pathState.dVC, bsdfRevPdfW);
 		Float misWeight = 1.f / (wLight + 1.f + wCamera);
-		//Log(EInfo, "wLight: %f, wCamera: %f, emissionPdfW: %f, directPdfW: %f\ndVCM: %f, dVC: %f, bsdfRevPdfW: %f",
-		//	wLight, wCamera, emissionPdfW, directPdfW, pathState.dVCM, pathState.dVC, bsdfRevPdfW);
-		//Log(EInfo, "wLight: %f, wCamera: %f, misWeight: %f", wLight, wCamera, misWeight);
 		Spectrum contrib = (misWeight / (lightPickProb * directPdfW)) * (radiance * bsdfFactor);
 		color = pathState.mThroughput * contrib;
 
@@ -720,7 +713,6 @@ public:
 
 		Float cosToCamera = std::abs(Frame::cosTheta(bsdfRec.wo));
 
-
 		const Float imagePlaneDist = sensor->getFilm()->getSize().x / (2.0f * std::tan(sensor->getXFov() * M_PI / 360));
 		const Float imagePointToCameraDist = imagePlaneDist / cosAtCamera;
 		const Float imageToSolidAngleFactor = imagePointToCameraDist * imagePointToCameraDist/ cosAtCamera;
@@ -731,8 +723,6 @@ public:
 		const Float misWeight = 1.f / (1.f + wLight);
 		const Float surfaceToImageFactor = 1.f / imageToSurfaceFactor;
 		const Spectrum contrib = misWeight * pathState.mThroughput * bsdfFactor / (mLightSubPathCount * surfaceToImageFactor);
-		//Log(EInfo, "throughput: %s", pathState.mThroughput.toString().c_str());
-		//Log(EInfo, "misWeight: %f, surfaceToImageFactor: %f, contrib: %s", misWeight, surfaceToImageFactor, contrib.toString().c_str());
 
 		if (!contrib.isZero()) {
 			if(occluded(its.p, dRec.d, dRec.dist)) {
