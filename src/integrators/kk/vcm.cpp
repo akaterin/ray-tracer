@@ -86,8 +86,8 @@ class VCMIntegrator : public Integrator {
 
 			void operator() (const VCMTreeEntry& lightVertexNode) {
 				const VCMVertex& lightVertex = lightVertexNode.data;
-				if((lightVertex.mPathLength + m_pathState.mPathLength >
-							m_vertexCM->m_config.maxDepth) ||
+				if((m_vertexCM->m_config.maxDepth != -1 && (lightVertex.mPathLength + m_pathState.mPathLength >
+							m_vertexCM->m_config.maxDepth)) ||
 						(lightVertex.mPathLength + m_pathState.mPathLength <
 						 m_vertexCM->m_config.minDepth)) {
 					return;
@@ -150,6 +150,8 @@ public:
 		m_config.useVC = props.getBoolean("useVC", true);
 		m_config.useVM = props.getBoolean("useVM", true);
 		m_config.lightTraceOnly = props.getBoolean("lightTraceOnly", false);
+		m_config.baseRadiusFactor = props.getFloat("baseRadiusFactor", 0.003f);
+		m_config.radiusAlpha = props.getFloat("radiusAlpha", 0.75f);
 
 
 		m_config.dump();
@@ -216,12 +218,12 @@ public:
 		film->setBitmap(mBitmap);
 
 		// TODO: move it to config
-		const Float radiusAlpha = 0.75f;
+		const Float radiusAlpha = m_config.radiusAlpha;
 
-		for (int iterationNum = 0; iterationNum < m_config.iterationCount; iterationNum++) {
+		for (m_iterationNum = 0; m_iterationNum < m_config.iterationCount; m_iterationNum++) {
 			// TODO: move base radius to config
-			Float radius = scene->getBSphere().radius * 0.003f;
-			radius /= std::pow(Float(iterationNum + 1), 0.5f * (1 - radiusAlpha));
+			Float radius = scene->getBSphere().radius * m_config.baseRadiusFactor;
+			radius /= std::pow(Float(m_iterationNum + 1), 0.5f * (1 - radiusAlpha));
 			const Float radiusSqr = radius * radius;
 
 			mVmNormalization = 1.f / (radiusSqr * M_PI * mLightSubPathCount);
@@ -242,7 +244,7 @@ public:
 			for (int i = 0; i < (int)pathCount; ++i) {
 				SubPathState pathState;
 
-				mSampler->generate(Point2i(i * iterationNum + 1));
+				mSampler->generate(Point2i(i * m_iterationNum + 1));
 
 				Ray ray = generateLightSample(pathState);
 
@@ -268,7 +270,8 @@ public:
 					pathState.dVC /= cosTheta;
 					pathState.dVM /= cosTheta;
 
-					if (!(bsdf->getType() & BSDF::EDelta)) {
+					if (!(bsdf->getType() & BSDF::EDelta) &&
+							(m_config.useVC || m_config.useVM)) {
 						VCMVertex v(
 								its.p,
 								its,
@@ -283,10 +286,11 @@ public:
 					}
 					if (!(bsdf->getType() & BSDF::EDelta) &&
 							(m_config.useVC || m_config.lightTraceOnly)) {
-						connectToEye(pathState, its, bsdf, iterationNum);
+						if (pathState.mPathLength + 1 >= m_config.minDepth)
+							connectToEye(pathState, its, bsdf);
 					}
 
-					if (pathState.mPathLength + 2 > m_config.maxDepth) {
+					if (m_config.maxDepth != -1 && pathState.mPathLength + 2 > m_config.maxDepth) {
 						break;
 					}
 
@@ -325,7 +329,7 @@ public:
 
 				Point2i startPosition = Point2i(currentX, currentY);
 
-				mSampler->generate(startPosition * iterationNum);
+				mSampler->generate(startPosition * m_iterationNum);
 
 				Ray ray = generateCameraSample(pathState, pathIdx, pathCount);
 
@@ -334,7 +338,9 @@ public:
 					Intersection its;
 
 					if (!mScene->rayIntersect(ray, its)) {
-						// TODO: add background emitter radiance
+						if (pathState.mPathLength >= m_config.minDepth) {
+							// TODO: add background emitter radiance
+						}
 						break;
 					}
 
@@ -352,7 +358,7 @@ public:
 					pathState.dVM /= cosTheta;
 
 					// Case #1 - we hit the light
-					if (its.isEmitter()) {
+					if (its.isEmitter() && pathState.mPathLength >= m_config.minDepth) {
 						Spectrum radiance = its.Le(its.wi);
 
 						if (radiance.isZero()) {
@@ -368,6 +374,11 @@ public:
 						if (pathState.mPathLength == 1) {
 							color += pathState.mThroughput * radiance;
 						} else {
+							if (m_config.useVM && !m_config.useVC) {
+								color += pathState.mThroughput * (pathState.mSpecularPath ? radiance : Spectrum(0.0f));
+								break;
+							}
+
 							PositionSamplingRecord pRec(its);
 							DirectionSamplingRecord dRec(-ray.d, ESolidAngle);
 							const Emitter *emitter = its.shape->getEmitter();
@@ -397,17 +408,22 @@ public:
 
 					// Case #2 - Vertex Connection - connect to light
 					// source
-					if (!(bsdf->getType() & BSDF::EDelta)) {
-						color += ConnectToLight(pathState, its, bsdf);
+					if (!(bsdf->getType() & BSDF::EDelta) && m_config.useVC) {
+						if (pathState.mPathLength + 1 >= m_config.minDepth)
+							color += ConnectToLight(pathState, its, bsdf);
 					}
 
 					// Case #3 - Vertex Connection - Connect to light vertices
-					if (!(bsdf->getType() & BSDF::EDelta)) {
+					if (!(bsdf->getType() & BSDF::EDelta) && m_config.useVC) {
 						int startingLightVertex = pathIdx == 0 ? 0 : m_pathEnds[pathIdx-1];
 						int lastLightVertex = m_pathEnds[pathIdx];
 
 						for (int i = startingLightVertex; i < lastLightVertex; i++) {
 							const VCMVertex &lightVertex = m_lightVertices[i];
+
+							if (lightVertex.mPathLength + 1 +
+									pathState.mPathLength < m_config.minDepth)
+								continue;
 
 							if (m_config.maxDepth != -1 &&
 								lightVertex.mPathLength + pathState.mPathLength + 1 > m_config.maxDepth)
@@ -429,11 +445,11 @@ public:
 						break;
 					}
 				}
-				accumulateColor(currentX, currentY, color, iterationNum);
+				accumulateColor(currentX, currentY, color);
 			}
-			Log(EInfo, "Done iteration %d", iterationNum + 1);
+			Log(EInfo, "Done iteration %d", m_iterationNum + 1);
 
-			film->addBitmap(mBitmaps[iterationNum], (Float) 1.0f / m_config.iterationCount);
+			film->addBitmap(mBitmaps[m_iterationNum], (Float) 1.0f / m_config.iterationCount);
 			queue->signalRefresh(job);
 		}
 
@@ -489,8 +505,8 @@ public:
 		const PerspectiveCamera* sensor =
 			static_cast<const PerspectiveCamera*>(mScene->getSensor());
 		const Vector2i res = sensor->getFilm()->getSize();
-		int currentX = pixelIndex % res.x + mSampler->next1D();
-		int currentY = pixelIndex / res.x + mSampler->next1D();
+		int currentX = pixelIndex % res.x;
+		int currentY = pixelIndex / res.x;
 
 		// when computing cameraPdfW mitsuba uses a bounding box to check if
 		// the point lies inside an AABB. Sometimes the point may lie on the
@@ -533,8 +549,8 @@ public:
 		return cameraPdfW;
 	}
 
-	void accumulateColor(int x, int y, const Spectrum& color, int iteration) {
-		Spectrum *target = (Spectrum *) mBitmaps[iteration]->getUInt8Data();
+	void accumulateColor(int x, int y, const Spectrum& color) {
+		Spectrum *target = (Spectrum *) mBitmaps[m_iterationNum]->getUInt8Data();
 		target[y * mBitmap->getWidth() + x] += color;
 	}
 
@@ -668,7 +684,7 @@ public:
 		return color;
 	}
 
-	void connectToEye(SubPathState &pathState, const Intersection& its, const BSDF* bsdf, int iterationNum) {
+	void connectToEye(SubPathState &pathState, const Intersection& its, const BSDF* bsdf) {
 		// Sample point on a sensor
 		DirectSamplingRecord dRec(its.p, its.time);
 
@@ -729,7 +745,7 @@ public:
 				return;
 			}
 
-			accumulateColor(imagePos.x, imagePos.y, contrib, iterationNum);
+			accumulateColor(imagePos.x, imagePos.y, contrib);
 		}
 	}
 
@@ -764,15 +780,17 @@ private:
 			bsdfRevPdfW = bsdf->pdf(bRec);
 		}
 
-		// TODO: Russian Roulette
-		Float contProb = std::min(pathState.mThroughput.max(), (Float) 0.95f);
+		if (m_config.rrDepth != -1 && m_config.rrDepth >= m_iterationNum + 1) {
+			Float contProb = std::min(pathState.mThroughput.max(), (Float) 0.95f);
 
-		if (mSampler->next1D() > contProb) {
-			return false;
+			if (mSampler->next1D() > contProb) {
+				return false;
+			}
+
+			// TODO: Russian Roulette
+			//bsdfDirPdfW /= contProb;
+			//bsdfRevPdfW /= contProb;
 		}
-
-		//bsdfDirPdfW /= contProb;
-		//bsdfRevPdfW /= contProb;
 		cosThetaOut = std::abs(Frame::cosTheta(bRec.wo));
 
 		if (bsdf->getType() & BSDF::EDelta) {
@@ -816,6 +834,8 @@ private:
 	std::vector<Bitmap*> mBitmaps;
 	Scene *mScene;
 	Sampler *mSampler;
+
+	int m_iterationNum;
 
 };
 

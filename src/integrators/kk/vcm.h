@@ -26,7 +26,8 @@ struct VCMConfiguration {
 	bool useVC;
 	bool useVM;
 	bool lightTraceOnly;
-
+	Float baseRadiusFactor;
+	Float radiusAlpha;
 
 	inline VCMConfiguration() { }
 
@@ -38,6 +39,8 @@ struct VCMConfiguration {
 		useVC = stream->readBool();
 		useVM = stream->readBool();
 		lightTraceOnly = stream->readBool();
+		baseRadiusFactor = stream->readFloat();
+		radiusAlpha = stream->readFloat();
 	}
 
 	inline void serialize(Stream *stream) const {
@@ -48,6 +51,8 @@ struct VCMConfiguration {
 		stream->writeBool(useVC);
 		stream->writeBool(useVM);
 		stream->writeBool(lightTraceOnly);
+		stream->writeFloat(baseRadiusFactor);
+		stream->writeFloat(radiusAlpha);
 	}
 
 	void dump() const {
@@ -59,6 +64,8 @@ struct VCMConfiguration {
 		SLog(EInfo, "   Use Vertex Connection       : %i", useVC);
 		SLog(EInfo, "   Use Vertex Merging          : %i", useVM);
 		SLog(EInfo, "   Light Trace Only            : %i", lightTraceOnly);
+		SLog(EInfo, "   Base Radius                 : %f", baseRadiusFactor);
+		SLog(EInfo, "   Radius alpha                : %f", radiusAlpha);
 	}
 };
 

@@ -217,13 +217,18 @@
 	<plugin type="integrator" name="vcmintegrator" readableName="Vertex Connection And Merging Integrator"
 			show="true" className="VCMIntegrator" extends="Integrator">
 			<descr>
-				<p>Mine!!!</p>
+				<p>Vertex Connection and Merging integrator.</p>
 			</descr>
 			<param name="maxDepth" readableName="Maximum depth" type="integer" default="-1">
 				Specifies the longest path depth in the generated output image (where <tt>-1</tt>
 				corresponds to ∞). A value of 1 will only render directly visible light sources.
 				2 will lead to single-bounce (direct-only) illumination, and so on.
 			</param>
+
+			<param name="minDepth" readableName="Minimum depth" type="integer" default="1">
+				Specifies the shortest path depth in the generated output image. You want it to be higher than <tt>2</tt> if you want to render only indirect lighting using this algorithm.
+			</param>
+
 			<param name="rrDepth" readableName="Russian Roulette starting depth" type="integer" default="5" importance="1">
 				Specifies the minimum path depth, after which the implementation will start to use the
 				"russian roulette" path termination criterion (set to <tt>-1</tt> to disable).
@@ -237,8 +242,14 @@
 			<param name="useVM" readableName="Use Vertex Merging" type="boolean" default="true" importance="1">
 				Specifies whether to use vertex merging or not.
 			</param>
-			<param name="lightTraceOnly" readableName="Number of iterations" type="boolean" default="false" importance="1">
-				If set to true, only light trace will be performed.
+			<param name="lightTraceOnly" readableName="Use only traditional ray tracing" type="boolean" default="false" importance="1">
+				If set to true, only light tracing will be performed. (even if you state to use vertex connection or merging they will be disabled anyway)
+			</param>
+			<param name="baseRadiusFactor" readableName="Base Radius Factor for Vertex Merging" type="float" default="0.003" importance="1">
+				Changes the default merging radius factor. The radius in first iteration is equal to the radius of the scene's bounding sphere multiplied by the base radius factor.
+			</param>
+			<param name="radiusAlpha" readableName="Radius Alpha for vertex merging" type="float" default="0.75" importance="1">
+				Changes the rate at which the merging radius becomes smaller with each iteration.
 			</param>
 	</plugin>
 
